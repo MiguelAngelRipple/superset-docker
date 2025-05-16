@@ -1,0 +1,130 @@
+version: '3'
+
+services:
+  postgres:
+    image: postgres:13
+    container_name: superset_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:6
+    container_name: superset_redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    ports:
+      - "${REDIS_PORT}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  superset:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: superset_app
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      # Superset configuration
+      - SUPERSET_SECRET_KEY=${SUPERSET_SECRET_KEY}
+      - SUPERSET_ADMIN_USERNAME=${SUPERSET_ADMIN_USERNAME}
+      - SUPERSET_ADMIN_PASSWORD=${SUPERSET_ADMIN_PASSWORD}
+      - SUPERSET_ADMIN_EMAIL=${SUPERSET_ADMIN_EMAIL}
+      - PYTHONPATH=${PYTHONPATH}
+      - FLASK_APP=${FLASK_APP}
+      - SUPERSET_LOAD_EXAMPLES=no
+      - SUPERSET_PORT=${SUPERSET_PORT}
+      
+      # Database configuration
+      - DATABASE_DIALECT=postgresql
+      - DATABASE_USER=${POSTGRES_USER}
+      - DATABASE_PASSWORD=${POSTGRES_PASSWORD}
+      - DATABASE_HOST=${POSTGRES_HOST}
+      - DATABASE_PORT=${POSTGRES_INTERNAL_PORT}
+      - DATABASE_DB=${POSTGRES_DB}
+      
+      # Redis configuration
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      
+      # SQLAlchemy configuration
+      - SQLALCHEMY_DATABASE_URI=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_INTERNAL_PORT}/${POSTGRES_DB}
+    ports:
+      - "${SUPERSET_PORT}:8088"
+    volumes:
+      - ./superset_home:/app/superset_home
+      - ./docker-bootstrap.sh:/docker-bootstrap.sh
+    command: ["bash", "/docker-bootstrap.sh"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  superset-init:
+    image: apache/superset:latest
+    container_name: superset_init
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      - SUPERSET_SECRET_KEY=${SUPERSET_SECRET_KEY}
+      - SUPERSET_ADMIN_USERNAME=${SUPERSET_ADMIN_USERNAME}
+      - SUPERSET_ADMIN_PASSWORD=${SUPERSET_ADMIN_PASSWORD}
+      - SUPERSET_ADMIN_EMAIL=${SUPERSET_ADMIN_EMAIL}
+      - PYTHONPATH=${PYTHONPATH}
+      - FLASK_APP=${FLASK_APP}
+      - SUPERSET_LOAD_EXAMPLES=no
+      - DATABASE_DIALECT=postgresql
+      - DATABASE_USER=${POSTGRES_USER}
+      - DATABASE_PASSWORD=${POSTGRES_PASSWORD}
+      - DATABASE_HOST=${POSTGRES_HOST}
+      - DATABASE_PORT=${POSTGRES_INTERNAL_PORT}
+      - DATABASE_DB=${POSTGRES_DB}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+    volumes:
+      - ./superset_home:/app/superset_home
+      - ./docker-init.sh:/docker-init.sh
+    command: ["bash", "/docker-init.sh"]
+    restart: "no"
+
+  okd_sync:
+    build:
+      context: ./okd_sync
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+    environment:
+      PG_HOST: postgres
+      PG_PORT: 5432
+      PG_DB: ${POSTGRES_DB}
+      PG_USER: ${POSTGRES_USER}
+      PG_PASS: ${POSTGRES_PASSWORD}
+    restart: unless-stopped
+    volumes:
+      - ./okd_sync:/app
+
+volumes:
+  postgres-data:
+  redis-data:
+
