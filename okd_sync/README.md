@@ -8,9 +8,10 @@ The ODK Sync service performs the following functions:
 
 1. Connects to an ODK Central instance via OData API
 2. Retrieves new or updated form submissions since the last synchronization
-3. Creates the PostgreSQL table if it doesn't exist
+3. Creates the PostgreSQL tables if they don't exist
 4. Inserts new records or updates existing ones based on UUID
-5. Tracks the last synchronization timestamp for incremental updates
+5. Creates a unified view that combines data from multiple tables
+6. Tracks the last synchronization timestamp for incremental updates
 
 ## Project Structure
 
@@ -19,6 +20,7 @@ The ODK Sync service performs the following functions:
 - `requirements.txt`: Python dependencies
 - `Dockerfile`: Container definition for the service
 - `last_sync.txt`: Local file to store the last synchronization timestamp
+- `README.md`: Documentation for the service
 
 ## Configuration
 
@@ -27,16 +29,27 @@ The ODK Sync service performs the following functions:
 Copy the `.env.example` file to `.env` and fill in the values:
 
 ```
-ODATA_URL=https://your-odk-central-instance.com/v1/projects/1/forms/your-form-name.svc/Submissions
+# ODK Central OData API configuration
+ODK_BASE_URL=https://your-odk-central-instance.com
+ODK_PROJECT_ID=1
+ODK_FORM_ID=Your%20Form%20Name
+
+# ODK Central credentials
 ODATA_USER=your-username
 ODATA_PASS=your-password
+
+# PostgreSQL connection details
 PG_HOST=postgres
 PG_PORT=5432
 PG_DB=Submissions
 PG_USER=postgres
 PG_PASS=postgres
-SYNC_INTERVAL=60  # Synchronization interval in seconds (default: 60)
+
+# Synchronization interval in seconds
+SYNC_INTERVAL=60
 ```
+
+**Important**: Make sure the `PG_PORT` value matches the port exposed by your PostgreSQL container (default is 5432).
 
 ### Required Python Packages
 
@@ -99,6 +112,14 @@ If you want to run the service outside of Docker:
 
 2. **Query OData API**: It queries the ODK Central OData API for submissions newer than the last sync time
 
+3. **Process Main Submissions**: It processes the main form submissions and inserts/updates them in the database
+
+4. **Process Person Details**: It processes the person details related to each submission
+
+5. **Create Unified View**: It creates a unified view that combines data from both tables, with person details stored in a JSON field
+
+6. **Update Last Sync Time**: It updates the last synchronization timestamp
+
 3. **Table Creation**: If the `Submissions` table doesn't exist, it's created automatically with columns matching the OData feed
 
 4. **Upsert Operation**: For each record:
@@ -131,33 +152,61 @@ Logs include:
 - Errors and warnings
 - Next scheduled execution time
 
+## Unified Data Structure
+
+The service creates three tables in the PostgreSQL database:
+
+1. **GRARentalDataCollection**: Contains the main form submissions
+2. **GRARentalDataCollection_person_details**: Contains the person details related to each submission
+3. **GRARentalDataCollection_unified**: A unified view that combines data from both tables
+
+The unified table structure includes:
+- All fields from the main table with their original names
+- A JSON field called `person_details` that contains all the data from the person details table
+
+This structure allows you to query the data in Superset using standard SQL and JSON functions.
+
+### Example Queries
+
+```sql
+-- Basic query to get main data with person details
+SELECT 
+  __id, 
+  survey_date, 
+  property_description,
+  person_details->>'individual_first_name' as first_name,
+  person_details->>'individual_last_name' as last_name
+FROM "GRARentalDataCollection_unified"
+LIMIT 10;
+
+-- Query with JSON filtering
+SELECT 
+  __id, 
+  survey_date, 
+  person_details->>'individual_first_name' as first_name,
+  person_details->>'mobile_1' as contact
+FROM "GRARentalDataCollection_unified"
+WHERE person_details::jsonb @> '{"individual_gender": "male"}'
+LIMIT 5;
+```
+
 ## Troubleshooting
 
 ### Common Issues
 
-1. **Connection Errors**: Check that the ODK Central URL is correct and accessible
+- **Connection Errors**: Check that your ODK Central instance is accessible and credentials are correct
+- **Database Errors**: Verify PostgreSQL connection details and that the database exists
+- **Permission Issues**: Ensure the PostgreSQL user has sufficient privileges
+- **Port Conflicts**: If PostgreSQL fails to start, check for port conflicts with local services
 
-2. **Authentication Failures**: Verify your ODK Central username and password
+### Quick Fixes
 
-3. **Database Connection Issues**: Ensure the PostgreSQL connection details are correct
-
-4. **Missing UUIDs**: If records are being skipped due to missing UUIDs, check your ODK form design
-
-### Resetting Synchronization
-
-To force a full resynchronization of all data:
-
-1. Remove the last sync timestamp:
+1. **Reset the Database**:
    ```bash
-   docker exec -it superset-docker_okd_sync_1 rm -f last_sync.txt
+   docker exec -it superset_postgres psql -U postgres -d Submissions -c "DROP TABLE IF EXISTS \"GRARentalDataCollection_unified\", \"GRARentalDataCollection_person_details\", \"GRARentalDataCollection\" CASCADE;"
    ```
 
-2. Clear the existing table (optional):
-   ```bash
-   docker exec -it superset_postgres psql -U postgres -d Submissions -c 'TRUNCATE TABLE "Submissions";'
-   ```
-
-3. Restart the sync service:
+2. **Restart the Sync Service**:
    ```bash
    docker-compose restart okd_sync
    ```

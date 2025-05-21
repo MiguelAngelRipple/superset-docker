@@ -11,6 +11,17 @@ The project consists of the following components:
 - **Redis**: For caching and Celery task queue
 - **ODK Sync Service**: A Python service that periodically synchronizes data from ODK Central to PostgreSQL
 
+## Quick Start Guide
+
+Follow these steps to get the system up and running quickly:
+
+1. **Clone the repository**
+2. **Configure the environment files**
+3. **Start the Docker containers**
+4. **Access Superset and create dashboards**
+
+Detailed instructions for each step are provided below.
+
 ## Prerequisites
 
 - Docker and Docker Compose installed on your system
@@ -81,17 +92,41 @@ cp okd_sync/.env.example okd_sync/.env
 Edit the `okd_sync/.env` file with your ODK Central credentials:
 
 ```
-ODATA_URL=https://your-odk-central-instance.com/v1/projects/1/forms/your-form-name.svc/Submissions
+# ODK Central OData API configuration
+ODK_BASE_URL=https://your-odk-central-instance.com
+ODK_PROJECT_ID=1
+ODK_FORM_ID=Your%20Form%20Name
+
+# ODK Central credentials
 ODATA_USER=your-username
 ODATA_PASS=your-password
+
+# PostgreSQL connection details
 PG_HOST=postgres
 PG_PORT=5432
 PG_DB=Submissions
 PG_USER=postgres
 PG_PASS=postgres
+
+# Synchronization interval in seconds
+SYNC_INTERVAL=60
 ```
 
+**Important**: Make sure the PostgreSQL port configuration is consistent between both `.env` files.
+
 ### 4. Start the services
+
+Before starting the services, make sure no other PostgreSQL instances are running on your system that might conflict with the Docker container:
+
+```bash
+# Check for running PostgreSQL instances
+ps aux | grep postgres
+
+# If needed, stop the local PostgreSQL service
+sudo service postgresql stop
+```
+
+Now start the Docker containers:
 
 ```bash
 docker-compose up -d
@@ -103,15 +138,29 @@ This command will:
 - Initialize Superset (create admin user, setup database)
 - Start the ODK sync service
 
-## Accessing Superset
+## Usage
 
-Once the containers are running, you can access Superset at:
+### Accessing Superset
+
+Once the services are up and running, you can access the Superset web interface at:
 
 ```
 http://localhost:8088
 ```
 
-Log in with the admin credentials you configured in the `.env` file.
+Log in with the admin credentials you set in the `.env` file (default: admin/admin123).
+
+### Verifying Data Synchronization
+
+To verify that data is being synchronized from ODK Central to PostgreSQL:
+
+```bash
+# Check the logs of the ODK sync service
+docker-compose logs -f okd_sync
+
+# Connect to the PostgreSQL database and check the tables
+docker exec -it superset_postgres psql -U postgres -d Submissions -c "\dt"
+```
 
 ## Connecting to the Submissions Database
 
@@ -130,11 +179,20 @@ Alternatively, you can use the SQLAlchemy URI:
 postgresql://postgres:postgres@postgres:5432/Submissions
 ```
 
-## Creating Datasets and Visualizations
+## Creating Dashboards
 
-1. After connecting to the database, go to **Data** > **Datasets** > **+ Dataset**
-2. Select the `Submissions` database, the `public` schema, and the `Submissions` table
-3. Click **Add** and then **Explore** to start creating visualizations
+1. **Connect to the PostgreSQL Database**:
+   - Go to Data > Databases
+   - Click + Database
+   - Select PostgreSQL
+   - Enter the connection details:
+     - Host: `postgres` (use the container name, not localhost)
+     - Port: `5432`
+     - Database Name: `Submissions`
+     - Username: `postgres`
+     - Password: `postgres` (or whatever you set in your .env file)
+   - Click Test Connection to verify
+   - Click Connect
 
 ## Troubleshooting
 
