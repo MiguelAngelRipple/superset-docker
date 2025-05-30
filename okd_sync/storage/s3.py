@@ -48,22 +48,22 @@ def get_s3_client():
     Returns:
         boto3.client: S3 client
     """
-    # Usar endpoint regional si la región no es us-east-1
-    if AWS_REGION and AWS_REGION != 'us-east-1':
-        endpoint_url = f'https://s3.{AWS_REGION}.amazonaws.com'
-    else:
-        endpoint_url = 'https://s3.amazonaws.com'
-        
-    # Crear una sesión de boto3 para asegurar consistencia en las credenciales
-    session = boto3.session.Session(
+    # Create a boto3 session with explicit credentials
+    logger.info(f"Creating S3 client with region: {AWS_REGION}")
+    
+    # For af-south-1 region, we need to use the specific endpoint
+    endpoint_url = f"https://s3.{AWS_REGION}.amazonaws.com"
+    
+    # Log credentials (masked) for debugging
+    masked_key = AWS_ACCESS_KEY[:4] + "****" + AWS_ACCESS_KEY[-4:] if AWS_ACCESS_KEY else None
+    logger.info(f"Using AWS credentials: {masked_key}, region: {AWS_REGION}, endpoint: {endpoint_url}")
+    
+    # Create a boto3 client with explicit configuration
+    return boto3.client(
+        's3',
         aws_access_key_id=AWS_ACCESS_KEY,
         aws_secret_access_key=AWS_SECRET_KEY,
-        region_name=AWS_REGION
-    )
-    
-    # Crear cliente S3 con la sesión y endpoint correcto
-    return session.client(
-        's3',
+        region_name=AWS_REGION,
         endpoint_url=endpoint_url
     )
 
@@ -115,13 +115,13 @@ def get_odk_session():
         return None
 
 
-def generate_signed_url(s3_key, expires=3600):
+def generate_signed_url(s3_key, expires=86400):
     """
     Generate a signed URL for an S3 object
     
     Args:
         s3_key: S3 key of the object
-        expires: Expiration time in seconds (default: 1 hour)
+        expires: Expiration time in seconds (default: 24 hours)
         
     Returns:
         str: Signed URL for the S3 object
@@ -131,21 +131,19 @@ def generate_signed_url(s3_key, expires=3600):
         return None
     
     try:
-        # Create a client with the correct region
-        # Usar endpoint regional si la región no es us-east-1
-        if AWS_REGION and AWS_REGION != 'us-east-1':
-            endpoint_url = f'https://s3.{AWS_REGION}.amazonaws.com'
-        else:
-            endpoint_url = 'https://s3.amazonaws.com'
+        # Generate a signed URL using the boto3 client
+        # Importante: Configurar el cliente con la región correcta
         s3_client = boto3.client(
             's3',
             aws_access_key_id=AWS_ACCESS_KEY,
             aws_secret_access_key=AWS_SECRET_KEY,
             region_name=AWS_REGION,
-            endpoint_url=endpoint_url
+            # Usar el endpoint correcto para la región
+            endpoint_url=f'https://s3.{AWS_REGION}.amazonaws.com'
         )
         
         # Generate a signed URL for the S3 object
+        # No modificar la URL después de generarla para evitar problemas de firma
         signed_url = s3_client.generate_presigned_url(
             'get_object',
             Params={
@@ -155,6 +153,7 @@ def generate_signed_url(s3_key, expires=3600):
             ExpiresIn=expires
         )
         
+        # No modificar la URL firmada, ya que esto invalidaría la firma
         logger.info(f"Generated signed URL for {s3_key} (expires in {expires} seconds)")
         return signed_url
     except Exception as e:
@@ -177,19 +176,30 @@ def upload_to_s3(file_data, s3_file_name):
         return None
     
     try:
-        # Create an S3 client
-        s3_client = get_s3_client()
+        # Create an S3 client with explicit endpoint
+        endpoint_url = f"https://s3.{AWS_REGION}.amazonaws.com"
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=AWS_ACCESS_KEY,
+            aws_secret_access_key=AWS_SECRET_KEY,
+            region_name=AWS_REGION,
+            endpoint_url=endpoint_url
+        )
         
-        # Omitir verificación de existencia para evitar errores 403
-        # Simplemente subir/sobrescribir el archivo directamente
-        logger.info(f"Proceeding with upload to S3: {s3_file_name}")
-        
-        # La operación put_object sobrescribirá automáticamente cualquier archivo existente
+        logger.info(f"Proceeding with upload to S3: {s3_file_name} (region: {AWS_REGION})")
         
         # If file_data is a file path, upload directly
         if isinstance(file_data, str) and os.path.isfile(file_data):
             logger.info(f"Uploading file from path: {file_data} to {s3_file_name}")
-            s3_client.upload_file(file_data, AWS_BUCKET_NAME, s3_file_name)
+            # Use put_object instead of upload_file for more control
+            with open(file_data, 'rb') as f:
+                file_content = f.read()
+                s3_client.put_object(
+                    Body=file_content,
+                    Bucket=AWS_BUCKET_NAME,
+                    Key=s3_file_name,
+                    ContentType='image/jpeg'  # Set appropriate content type
+                )
         # If file_data is a URL, download first
         elif isinstance(file_data, str) and (file_data.startswith('http://') or file_data.startswith('https://')):
             logger.info(f"Downloading from URL and uploading to S3: {file_data}")
@@ -200,7 +210,16 @@ def upload_to_s3(file_data, s3_file_name):
                         with open(temp_file.name, 'wb') as f:
                             response.raw.decode_content = True
                             shutil.copyfileobj(response.raw, f)
-                        s3_client.upload_file(temp_file.name, AWS_BUCKET_NAME, s3_file_name)
+                        
+                        # Use put_object instead of upload_file
+                        with open(temp_file.name, 'rb') as f:
+                            file_content = f.read()
+                            s3_client.put_object(
+                                Body=file_content,
+                                Bucket=AWS_BUCKET_NAME,
+                                Key=s3_file_name,
+                                ContentType='image/jpeg'  # Set appropriate content type
+                            )
                     else:
                         logger.error(f"Failed to download file from {file_data}, status code: {response.status_code}")
                         return None
@@ -214,7 +233,12 @@ def upload_to_s3(file_data, s3_file_name):
         # If file_data is binary data, upload directly
         else:
             logger.info(f"Uploading binary data to S3: {s3_file_name}")
-            s3_client.put_object(Body=file_data, Bucket=AWS_BUCKET_NAME, Key=s3_file_name)
+            s3_client.put_object(
+                Body=file_data, 
+                Bucket=AWS_BUCKET_NAME, 
+                Key=s3_file_name,
+                ContentType='image/jpeg'  # Set appropriate content type
+            )
         
         logger.info(f"Successfully uploaded file to S3: {s3_file_name}")
         
@@ -554,7 +578,7 @@ def process_attachments(submissions, max_workers=10, prioritize_new=True):
                 if processed_count % 10 == 0 or processed_count == total_count:
                     logger.info(f"Processed {processed_count}/{total_count} submissions")
     
-    # Update submissions with S3 URLs and HTML for Superset
+    # Update submissions with S3 URLs
     image_count = 0
     for submission in submissions:
         submission_id = submission.get('UUID') or submission.get('__id')
@@ -562,8 +586,8 @@ def process_attachments(submissions, max_workers=10, prioritize_new=True):
             result = results_dict[submission_id]
             # Set the URL for the image
             submission['building_image_url'] = result['url']
-            # Set the HTML for Superset visualization
-            submission['building_image_url_html'] = result['html']
+            # No agregamos building_image_url_html aquí ya que no está en el modelo MainSubmission
+            # Este campo se genera en la vista unificada
             image_count += 1
     
     logger.info(f"Attachment process completed: {processed_count} submissions processed, {image_count} images uploaded")

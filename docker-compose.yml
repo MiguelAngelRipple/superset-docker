@@ -112,17 +112,26 @@ services:
       context: ./okd_sync
     env_file:
       - .env
+      - ./okd_sync/.env
     depends_on:
       - postgres
     environment:
+      # PostgreSQL connection details
       PG_HOST: postgres
       PG_PORT: 5432
       PG_DB: ${POSTGRES_DB}
       PG_USER: ${POSTGRES_USER}
       PG_PASS: ${POSTGRES_PASSWORD}
+      # AWS S3 configuration (using standard SDK names)
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
+      AWS_BUCKET_NAME: ${AWS_BUCKET_NAME}
     restart: unless-stopped
     volumes:
       - ./okd_sync:/app
+    networks:
+      - default
 
 volumes:
   postgres-data:

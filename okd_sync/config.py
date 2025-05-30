@@ -46,11 +46,17 @@ PG_USER = os.getenv("PG_USER", "postgres")
 PG_PASS = os.getenv("PG_PASS", "postgres")
 
 # AWS S3 configuration
-# Usar credenciales directamente para evitar problemas con variables de entorno
-AWS_ACCESS_KEY = "AKIA6QLOECYD2MQGBIUE"  # Clave correcta que aparece en las URLs firmadas
-AWS_SECRET_KEY = "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"
-AWS_BUCKET_NAME = "rtcs-gm-images"
-AWS_REGION = "af-south-1"
+# Use standard AWS SDK environment variable names with fallbacks
+AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID", os.getenv("AWS_ACCESS_KEY", ""))
+AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", os.getenv("AWS_SECRET_KEY", ""))
+AWS_BUCKET_NAME = os.getenv("AWS_BUCKET_NAME", "")
+AWS_REGION = os.getenv("AWS_DEFAULT_REGION", os.getenv("AWS_REGION", ""))
+
+# Log the AWS credentials being used (with masking for security)
+masked_key = AWS_ACCESS_KEY[:4] + "****" + AWS_ACCESS_KEY[-4:] if len(AWS_ACCESS_KEY) > 8 else "Not set"
+logging.info(f"Using AWS credentials: {masked_key}, region: {AWS_REGION}, bucket: {AWS_BUCKET_NAME}")
+
+# Construct the S3 URL prefix correctly with region
 AWS_S3_URL_PREFIX = f"https://{AWS_BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com" if AWS_BUCKET_NAME and AWS_REGION else ""
 
 # Synchronization settings

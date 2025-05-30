@@ -99,16 +99,33 @@ def main(max_workers=MAX_WORKERS, prioritize_new=PRIORITIZE_NEW):
         upsert_person_details(person_details_records)
     
     # Create or update the unified view after processing the data
-    # Only update if we have new records or if the unified table doesn't exist yet
-    if main_records or person_details_records:
-        # Check if the unified table exists
-        unified_exists = table_exists(UNIFIED_TABLE)
-        if not unified_exists:
-            logger.info(f"Unified table {UNIFIED_TABLE} does not exist, creating it")
+    # Always recreate the unified table to ensure it has the latest data
+    # and that it is correctly structured
+    try:
+        logger.info(f"Recreating unified table {UNIFIED_TABLE} to ensure it has the latest data")
+        create_unified_view(force_recreate=True)
+    except Exception as e:
+        logger.error(f"Error recreating unified table: {e}")
+        # Try to create the table from scratch if there was an error
+        try:
+            logger.info(f"Attempting to create unified table from scratch")
+            # Execute the SQL query directly to create the unified table
+            from db.connection import execute_query
+            drop_query = f"DROP TABLE IF EXISTS {UNIFIED_TABLE} CASCADE"
+            execute_query(drop_query)
             create_unified_view(force_recreate=True)
+        except Exception as inner_e:
+            logger.error(f"Failed to create unified table from scratch: {inner_e}")
+            logger.warning("Continuing without unified table. This may affect Superset visualizations.")
+    else:
+        logger.info(f"Successfully recreated unified table {UNIFIED_TABLE}")
+        # Verify that the table was created correctly
+        if table_exists(UNIFIED_TABLE):
+            logger.info(f"Verified that unified table {UNIFIED_TABLE} exists")
         else:
-            logger.info(f"Updating unified table {UNIFIED_TABLE}")
-            create_unified_view(force_recreate=False)
+            logger.error(f"Unified table {UNIFIED_TABLE} does not exist after recreation attempt")
+            logger.warning("This may affect Superset visualizations.")
+
     
     # Update last sync time if we have any records with timestamps
     if main_records:
