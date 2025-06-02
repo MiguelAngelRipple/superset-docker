@@ -102,6 +102,20 @@ sqlalchemy>=1.4.0
 sqlalchemy-utils>=0.38.0
 Pillow>=9.0.0
 ```
+### Local Development
+
+```bash
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+venv\Scripts\activate     # Windows
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run application
+python main.py
+```
 
 ## Running the Service
 
