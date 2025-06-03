@@ -229,7 +229,7 @@ def create_unified_view(force_recreate=False):
             NULL::jsonb as person_details,
             CASE 
                 WHEN m.building_image_url IS NOT NULL 
-                THEN '<img src="' || m.building_image_url || '" width="200" />' 
+                THEN '<img src=' || CHR(34) || m.building_image_url || CHR(34) || ' width=' || CHR(34) || '100%' || CHR(34) || ' height=' || CHR(34) || '100%' || CHR(34) || ' />' 
                 ELSE NULL 
             END as building_image_url_html
         FROM "{MAIN_TABLE}" m
@@ -270,7 +270,7 @@ def create_unified_view(force_recreate=False):
                 ) FILTER (WHERE p."UUID" IS NOT NULL) as person_details,
                 CASE 
                     WHEN m.building_image_url IS NOT NULL 
-                    THEN '<img src="' || m.building_image_url || '" width="200" />' 
+                    THEN '<img src=' || CHR(34) || m.building_image_url || CHR(34) || ' width=' || CHR(34) || '100%' || CHR(34) || ' height=' || CHR(34) || '100%' || CHR(34) || ' />' 
                     ELSE NULL 
                 END as building_image_url_html
             FROM "{MAIN_TABLE}" m

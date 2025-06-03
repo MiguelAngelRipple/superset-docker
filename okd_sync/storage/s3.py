@@ -331,14 +331,14 @@ def download_and_upload_attachment(submission_id, attachment_field, attachment_u
         logger.error(f"Error processing attachment: {e}")
         return None
 
-def generate_image_html(image_url, width=300, height=200, is_placeholder=False):
+def generate_image_html(image_url, width="100%", height="100%", is_placeholder=False):
     """
     Generate HTML to display an image in Superset
     
     Args:
         image_url: URL of the image (signed URL)
-        width: Width of the image in pixels
-        height: Height of the image in pixels
+        width: Width of the image (default: 100%)
+        height: Height of the image (default: 100%)
         is_placeholder: Whether this is a placeholder image
         
     Returns:
@@ -352,16 +352,14 @@ def generate_image_html(image_url, width=300, height=200, is_placeholder=False):
     # Escape any quotes in the URL to prevent HTML injection
     safe_url = image_url.replace('"', '&quot;')
     
-    # Create responsive HTML with the signed URL
-    html = f'''
-    <div class="image-container{placeholder_class}">
-        <a href="{safe_url}" target="_blank" rel="noopener noreferrer">
-            <img src="{safe_url}" width="{width}" height="{height}" 
-                 style="object-fit: cover; border-radius: 4px; max-width: 100%;" 
-                 loading="lazy" alt="Building Image" />
-        </a>
-    </div>
-    '''
+    # Create responsive HTML with the signed URL - using single quotes for HTML attributes
+    html = f'<div class="image-container{placeholder_class}">'
+    html += f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">'
+    html += f'<img src="{safe_url}" width="{width}" height="{height}" '
+    html += f'style="object-fit: cover; border-radius: 4px; max-width: 100%;" '
+    html += f'loading="lazy" alt="Building Image" />'
+    html += f'</a>'
+    html += f'</div>'
     
     return html
 
