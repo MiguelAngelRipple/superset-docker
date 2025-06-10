@@ -1,6 +1,6 @@
 # ODK OData to PostgreSQL Sync Service
 
-This Python service synchronizes data from an ODK Central OData feed to a PostgreSQL database, performing upsert operations (insert or update) based on UUID. It's designed to run periodically in a Docker container as part of the Superset Docker deployment.
+This Python service synchronizes data from an ODK Central OData feed to a PostgreSQL database using SQLAlchemy ORM, performing upsert operations (insert or update) based on UUID. It's designed to run periodically in a Docker container as part of the Superset Docker deployment.
 
 ## Overview
 
@@ -15,7 +15,22 @@ The ODK Sync service performs the following functions:
 
 ## Project Structure
 
-- `main.py`: Main synchronization script with all the logic
+The project has been refactored into a modular structure for better maintainability and readability, now using SQLAlchemy ORM for database operations:
+
+- `main.py`: Main entry point that orchestrates the synchronization process
+- `config.py`: Centralized configuration management
+- `db/`: Database-related modules
+  - `connection.py`: Database connection handling
+  - `sqlalchemy_models.py`: SQLAlchemy ORM models and table definitions
+  - `sqlalchemy_operations.py`: Database operations using SQLAlchemy (upsert, create views, etc.)
+- `odk/`: ODK Central API interaction
+  - `api.py`: Functions to fetch data from ODK Central
+  - `parser.py`: Functions to parse and process ODK data
+- `storage/`: Storage operations
+  - `s3.py`: AWS S3 operations for image uploads
+- `utils/`: Utility functions
+  - `helpers.py`: Helper functions for various tasks
+  - `logger.py`: Logging configuration
 - `.env`: Environment variables for configuration (not to be committed to git)
 - `requirements.txt`: Python dependencies
 - `Dockerfile`: Container definition for the service
@@ -45,20 +60,61 @@ PG_DB=Submissions
 PG_USER=postgres
 PG_PASS=postgres
 
-# Synchronization interval in seconds
+# AWS S3 configuration
+AWS_ACCESS_KEY=your-access-key
+AWS_SECRET_KEY=your-secret-key
+AWS_BUCKET_NAME=your-bucket-name
+AWS_REGION=your-region
+
+# Synchronization settings
 SYNC_INTERVAL=60
+MAX_WORKERS=10
+PRIORITIZE_NEW=true
 ```
 
 **Important**: Make sure the `PG_PORT` value matches the port exposed by your PostgreSQL container (default is 5432).
+
+## Optimizations
+
+The service includes several optimizations to improve performance and efficiency:
+
+1. **Parallel Processing**: Uses multithreading to process attachments in parallel, significantly reducing the time required to upload images to S3.
+
+2. **Priority Queue**: Implements a priority queue to ensure that new submissions are processed first, making the system more responsive to recent data.
+
+3. **Modular Architecture**: Separates concerns into different modules, making the code more maintainable and easier to extend.
+
+4. **Improved Error Handling**: Better error handling and logging to identify and resolve issues more quickly.
+
+5. **Configurable Workers**: The number of worker threads can be configured through the `MAX_WORKERS` environment variable to optimize performance based on available resources.
 
 ### Required Python Packages
 
 The service requires the following Python packages (included in `requirements.txt`):
 
 ```
-requests
-psycopg2-binary
-python-dotenv
+requests>=2.28.0
+psycopg2-binary>=2.9.3
+python-dotenv>=0.20.0
+boto3>=1.24.0
+urllib3>=1.26.0
+sqlalchemy>=1.4.0
+sqlalchemy-utils>=0.38.0
+Pillow>=9.0.0
+```
+### Local Development
+
+```bash
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+venv\Scripts\activate     # Windows
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run application
+python main.py
 ```
 
 ## Running the Service
@@ -66,6 +122,14 @@ python-dotenv
 ### Within Docker Compose
 
 The service is designed to run as part of the Superset Docker deployment using Docker Compose. It's defined in the main `docker-compose.yml` file and will start automatically when you run:
+
+Make sure to build the image first:
+
+```bash
+docker-compose build okd_sync
+```
+
+And then start the service:
 
 ```bash
 docker-compose up -d
@@ -112,22 +176,20 @@ If you want to run the service outside of Docker:
 
 2. **Query OData API**: It queries the ODK Central OData API for submissions newer than the last sync time
 
-3. **Process Main Submissions**: It processes the main form submissions and inserts/updates them in the database
+3. **Create Tables**: SQLAlchemy models automatically create the necessary tables if they don't exist
 
-4. **Process Person Details**: It processes the person details related to each submission
+4. **Process Main Submissions**: It processes the main form submissions and inserts/updates them in the database using SQLAlchemy ORM
 
-5. **Create Unified View**: It creates a unified view that combines data from both tables, with person details stored in a JSON field
+5. **Process Person Details**: It processes the person details related to each submission
 
-6. **Update Last Sync Time**: It updates the last synchronization timestamp
+6. **Create Unified View**: It creates a unified view that combines data from both tables, with person details stored in a JSONB field
 
-3. **Table Creation**: If the `Submissions` table doesn't exist, it's created automatically with columns matching the OData feed
+7. **Update Last Sync Time**: It updates the last synchronization timestamp
 
-4. **Upsert Operation**: For each record:
+8. **Upsert Operation**: For each record:
    - If the UUID doesn't exist in the database, the record is inserted
    - If the UUID exists, the record is updated with new values
    - If a record lacks a UUID, it's logged and skipped
-
-5. **Update Last Sync Time**: The timestamp of the most recent submission is saved for the next run
 
 ### UUID Handling
 
@@ -154,40 +216,27 @@ Logs include:
 
 ## Unified Data Structure
 
-The service creates three tables in the PostgreSQL database:
+The service creates three tables in the PostgreSQL database using SQLAlchemy ORM:
 
 1. **GRARentalDataCollection**: Contains the main form submissions
 2. **GRARentalDataCollection_person_details**: Contains the person details related to each submission
-3. **GRARentalDataCollection_unified**: A unified view that combines data from both tables
+3. **GRARentalDataCollection_unified**: A unified table that combines data from both tables
+
+### SQLAlchemy Models
+
+The application uses SQLAlchemy ORM models to define the database schema and handle database operations:
+
+- **MainSubmission**: Model for the main submissions table
+- **PersonDetail**: Model for the person details table
+- **UnifiedView**: Model for the unified table
+
+These models provide a more maintainable and type-safe way to interact with the database compared to raw SQL queries.
 
 The unified table structure includes:
 - All fields from the main table with their original names
 - A JSON field called `person_details` that contains all the data from the person details table
 
 This structure allows you to query the data in Superset using standard SQL and JSON functions.
-
-### Example Queries
-
-```sql
--- Basic query to get main data with person details
-SELECT 
-  __id, 
-  survey_date, 
-  property_description,
-  person_details->>'individual_first_name' as first_name,
-  person_details->>'individual_last_name' as last_name
-FROM "GRARentalDataCollection_unified"
-LIMIT 10;
-
--- Query with JSON filtering
-SELECT 
-  __id, 
-  survey_date, 
-  person_details->>'individual_first_name' as first_name,
-  person_details->>'mobile_1' as contact
-FROM "GRARentalDataCollection_unified"
-WHERE person_details::jsonb @> '{"individual_gender": "male"}'
-LIMIT 5;
 ```
 
 ## Troubleshooting
