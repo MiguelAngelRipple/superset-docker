@@ -13,14 +13,14 @@ from config import ODATA_USER, ODATA_PASS, SUBMISSIONS_URL, PERSON_DETAILS_URL
 
 logger = logging.getLogger(__name__)
 
-def fetch_odata(url, last_sync=None, filter_field='SubmittedDate'):
+def fetch_odata(url, last_sync=None, filter_field='__system/submissionDate'):
     """
     Fetch data from ODK Central OData API
     
     Args:
         url: OData URL to fetch from
         last_sync: Timestamp of last synchronization
-        filter_field: Field to filter by for incremental sync
+        filter_field: Field to filter by for incremental sync (None for no filtering)
         
     Returns:
         list: List of records from the API
@@ -31,7 +31,7 @@ def fetch_odata(url, last_sync=None, filter_field='SubmittedDate'):
         "$count": "true"
     }
     
-    # Add filter for incremental sync if last_sync is provided
+    # Add filter for incremental sync if last_sync is provided and filter_field is specified
     if last_sync and filter_field:
         # Format timestamp for OData filter
         ts_str = last_sync.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
@@ -68,22 +68,23 @@ def fetch_main_submissions(last_sync):
     Returns:
         list: List of submission records
     """
-    return fetch_odata(SUBMISSIONS_URL, last_sync, 'SubmittedDate')
+    return fetch_odata(SUBMISSIONS_URL, last_sync, '__system/submissionDate')
 
 def fetch_person_details(last_sync):
     """
     Fetch person details records from ODK Central
     
     Args:
-        last_sync: Timestamp of last synchronization
+        last_sync: Timestamp of last synchronization (not used for filtering)
         
     Returns:
         list: List of person details records or empty list if the table doesn't exist
     """
-    # Person details are filtered by the parent submission date
-    # since it's a child table related to the main submissions
+    # Person details are child records that don't support OData filtering
+    # We'll fetch all person_details and filter them locally based on main submissions
     try:
-        return fetch_odata(PERSON_DETAILS_URL, last_sync, 'Submissions/SubmittedDate')
+        # Fetch all person_details without filter
+        return fetch_odata(PERSON_DETAILS_URL, None, None)
     except requests.exceptions.HTTPError as e:
         # If we get a 404, it means the person_details table doesn't exist in the form
         if e.response.status_code == 404:

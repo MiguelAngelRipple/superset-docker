@@ -15,7 +15,7 @@ import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Import configuration
-from config import MAX_WORKERS, PRIORITIZE_NEW, UNIFIED_TABLE, SYNC_INTERVAL, AWS_ACCESS_KEY, AWS_SECRET_KEY, AWS_BUCKET_NAME
+from config import MAX_WORKERS, PRIORITIZE_NEW, UNIFIED_TABLE, SYNC_INTERVAL, AWS_ACCESS_KEY, AWS_SECRET_KEY, AWS_BUCKET_NAME, ENABLE_URL_REFRESH, URL_REFRESH_THRESHOLD_HOURS
 
 # Import utility modules
 from utils.helpers import get_last_sync_time, set_last_sync_time
@@ -30,7 +30,7 @@ from db.sqlalchemy_models import create_tables, UNIFIED_TABLE
 from db.sqlalchemy_operations import upsert_submissions, upsert_person_details, create_unified_view
 
 # Import storage modules
-from storage.s3 import process_attachments
+from storage.s3 import process_attachments, refresh_expired_urls, update_unified_html_after_refresh
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -92,10 +92,45 @@ def main(max_workers=MAX_WORKERS, prioritize_new=PRIORITIZE_NEW):
         # Update the database with processed records
         upsert_submissions(main_records)
     
+    # Refresh expired URLs for existing records (independent of new submissions)
+    # This ensures that image URLs remain valid even if no new submissions are processed
+    if ENABLE_URL_REFRESH:
+        try:
+            logger.info("Checking for expired image URLs that need refreshing...")
+            refreshed_count = refresh_expired_urls(max_workers=max_workers)
+            if refreshed_count > 0:
+                logger.info(f"Refreshed {refreshed_count} expired image URLs")
+                # Update HTML fields in unified table after URL refresh
+                update_unified_html_after_refresh()
+            else:
+                logger.debug("No expired URLs found to refresh")
+        except Exception as e:
+            logger.error(f"Error during URL refresh process: {e}")
+            logger.warning("Continuing with sync process despite URL refresh error")
+    else:
+        logger.debug("URL refresh is disabled (ENABLE_URL_REFRESH=false)")
+    
     # Fetch person_details
     person_details_records = fetch_person_details(last_sync)
     if person_details_records:
         logger.info(f"Processing {len(person_details_records)} person_details records")
+        
+        # Filter person_details based on main submissions if we have a last_sync
+        if last_sync and main_records:
+            # Get the UUIDs of main submissions that were processed in this cycle
+            processed_uuids = {record.get('UUID') for record in main_records if record.get('UUID')}
+            
+            # Filter person_details to only include those related to processed main submissions
+            filtered_person_details = []
+            for person_record in person_details_records:
+                # Check if this person_detail belongs to a processed main submission
+                submission_id = person_record.get('__Submissions-id')
+                if submission_id and submission_id in processed_uuids:
+                    filtered_person_details.append(person_record)
+            
+            logger.info(f"Filtered person_details: {len(filtered_person_details)} out of {len(person_details_records)} records belong to processed main submissions")
+            person_details_records = filtered_person_details
+        
         upsert_person_details(person_details_records)
     
     # Create or update the unified view after processing the data
@@ -111,7 +146,7 @@ def main(max_workers=MAX_WORKERS, prioritize_new=PRIORITIZE_NEW):
             logger.info(f"Attempting to create unified table from scratch")
             # Execute the SQL query directly to create the unified table
             from db.connection import execute_query
-            drop_query = f"DROP TABLE IF EXISTS {UNIFIED_TABLE} CASCADE"
+            drop_query = f"DROP TABLE IF EXISTS \"{UNIFIED_TABLE}\" CASCADE"
             execute_query(drop_query)
             create_unified_view(force_recreate=True)
         except Exception as inner_e:
@@ -147,6 +182,8 @@ if __name__ == "__main__":
     # Configuration options
     logger.info("Synchronization service started. Running every %s seconds with %s workers. Prioritize new submissions: %s", 
                 SYNC_INTERVAL, MAX_WORKERS, PRIORITIZE_NEW)
+    logger.info("URL refresh enabled: %s. Refresh threshold: %s hours", 
+                ENABLE_URL_REFRESH, URL_REFRESH_THRESHOLD_HOURS)
     
     # Track the last run time to detect long-running processes
     last_run_time = None

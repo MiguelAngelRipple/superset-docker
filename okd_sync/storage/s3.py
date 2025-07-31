@@ -590,3 +590,207 @@ def process_attachments(submissions, max_workers=10, prioritize_new=True):
     
     logger.info(f"Attachment process completed: {processed_count} submissions processed, {image_count} images uploaded")
     return submissions
+
+def refresh_expired_urls(max_workers=5):
+    """
+    Refresh expired or soon-to-expire S3 URLs in the database.
+    
+    This function checks existing database records for URLs that are expired
+    or will expire soon (configurable threshold) and regenerates fresh signed URLs.
+    
+    Args:
+        max_workers: Maximum number of concurrent workers for parallel processing
+        
+    Returns:
+        int: Number of URLs refreshed
+    """
+    if not AWS_ACCESS_KEY or not AWS_SECRET_KEY or not AWS_BUCKET_NAME:
+        logger.warning("AWS credentials not configured. Cannot refresh URLs.")
+        return 0
+    
+    from db.sqlalchemy_models import MainSubmission, engine
+    from sqlalchemy.orm import Session
+    from urllib.parse import urlparse, parse_qs
+    from datetime import datetime, timedelta
+    import concurrent.futures
+    import re
+    
+    logger.info("Starting URL refresh process for expired/expiring URLs...")
+    
+    # Get records with image URLs from database
+    session = Session(engine)
+    try:
+        # Get all records that have building_image_url
+        records = session.query(MainSubmission).filter(
+            MainSubmission.building_image_url.isnot(None),
+            MainSubmission.building_image_url != ''
+        ).all()
+        
+        logger.info(f"Found {len(records)} records with image URLs to check")
+        
+        if not records:
+            return 0
+        
+        # Import threshold configuration
+        from config import URL_REFRESH_THRESHOLD_HOURS
+        
+        # Function to check if URL is expired or will expire soon
+        def is_url_expired_soon(url, hours_threshold=URL_REFRESH_THRESHOLD_HOURS):
+            """Check if S3 signed URL is expired or will expire within threshold hours"""
+            if not url or 'Expires=' not in url:
+                return True  # Treat as expired if no expiration found
+            
+            try:
+                # Extract expiration timestamp from URL
+                expires_match = re.search(r'Expires=(\d+)', url)
+                if not expires_match:
+                    return True
+                
+                expires_timestamp = int(expires_match.group(1))
+                expires_datetime = datetime.fromtimestamp(expires_timestamp)
+                threshold_datetime = datetime.now() + timedelta(hours=hours_threshold)
+                
+                is_expiring = expires_datetime <= threshold_datetime
+                if is_expiring:
+                    logger.debug(f"URL expires at {expires_datetime}, threshold is {threshold_datetime}")
+                
+                return is_expiring
+                
+            except Exception as e:
+                logger.warning(f"Could not parse expiration from URL: {e}")
+                return True  # Treat as expired if parsing fails
+        
+        # Filter records that need URL refresh
+        records_to_refresh = []
+        for record in records:
+            if is_url_expired_soon(record.building_image_url):
+                records_to_refresh.append(record)
+        
+        logger.info(f"Found {len(records_to_refresh)} URLs that need refreshing")
+        
+        if not records_to_refresh:
+            logger.info("No URLs need refreshing at this time")
+            return 0
+        
+        # Function to refresh a single record's URL
+        def refresh_single_url(record):
+            try:
+                # Extract S3 key from the existing URL
+                url = record.building_image_url
+                
+                # Parse S3 key from URL - handle both path styles
+                if AWS_BUCKET_NAME in url:
+                    # Extract key after bucket name
+                    if f"{AWS_BUCKET_NAME}.s3." in url:
+                        # Virtual hosted-style URL
+                        key_match = re.search(f'https://{re.escape(AWS_BUCKET_NAME)}\\.s3\\.[^/]+/([^?]+)', url)
+                    else:
+                        # Path-style URL
+                        key_match = re.search(f'/{re.escape(AWS_BUCKET_NAME)}/([^?]+)', url)
+                    
+                    if key_match:
+                        s3_key = key_match.group(1)
+                        
+                        # URL decode the S3 key to prevent double encoding
+                        # This is critical because the extracted key might already be URL encoded
+                        # We need to decode multiple times in case of nested encoding
+                        from urllib.parse import unquote
+                        
+                        # Keep unquoting until no more changes occur (handles multiple encoding levels)
+                        original_key = s3_key
+                        previous_key = None
+                        decode_attempts = 0
+                        
+                        while previous_key != s3_key and decode_attempts < 10:  # Safety limit
+                            previous_key = s3_key
+                            s3_key = unquote(s3_key)
+                            decode_attempts += 1
+                        
+                        logger.info(f"S3 key decoding: '{original_key}' -> '{s3_key}' (attempts: {decode_attempts})")
+                        
+                        # Generate new signed URL
+                        new_signed_url = generate_signed_url(s3_key)
+                        
+                        if new_signed_url:
+                            # Update record in database
+                            record.building_image_url = new_signed_url
+                            logger.info(f"Refreshed URL for submission {record.UUID}")
+                            return True
+                        else:
+                            logger.error(f"Failed to generate new signed URL for {record.UUID}")
+                            return False
+                    else:
+                        logger.error(f"Could not extract S3 key from URL: {url}")
+                        return False
+                else:
+                    logger.error(f"URL does not contain expected bucket name: {url}")
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"Error refreshing URL for record {record.UUID}: {e}")
+                return False
+        
+        # Process URLs in parallel
+        refreshed_count = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_record = {
+                executor.submit(refresh_single_url, record): record 
+                for record in records_to_refresh
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_record):
+                record = future_to_record[future]
+                try:
+                    success = future.result()
+                    if success:
+                        refreshed_count += 1
+                except Exception as e:
+                    logger.error(f"Error in URL refresh thread for {record.UUID}: {e}")
+        
+        # Commit all changes
+        if refreshed_count > 0:
+            session.commit()
+            logger.info(f"Successfully refreshed {refreshed_count} URLs in database")
+        
+        return refreshed_count
+        
+    except Exception as e:
+        logger.error(f"Error in refresh_expired_urls: {e}")
+        session.rollback()
+        return 0
+    finally:
+        session.close()
+
+def update_unified_html_after_refresh():
+    """
+    Update the building_image_url_html field in the unified table after URL refresh.
+    
+    This function regenerates the HTML img tags for all records that have
+    building_image_url to ensure the HTML field contains the latest URLs.
+    """
+    try:
+        from db.connection import execute_query
+        from config import UNIFIED_TABLE
+        
+        logger.info("Updating HTML fields in unified table after URL refresh...")
+        
+        # SQL to update building_image_url_html based on building_image_url
+        # Use double quotes around table name to preserve case in PostgreSQL
+        update_sql = f"""
+        UPDATE "{UNIFIED_TABLE}" 
+        SET building_image_url_html = CASE 
+            WHEN building_image_url IS NOT NULL AND building_image_url != '' THEN
+                '<img src="' || building_image_url || '" 
+                style="max-width: 100%; height: auto; border-radius: 4px; 
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);" 
+                onerror="this.style.display=''none''" />'
+            ELSE NULL
+        END
+        WHERE building_image_url IS NOT NULL AND building_image_url != '';
+        """
+        
+        result = execute_query(update_sql)
+        logger.info("Successfully updated HTML fields in unified table")
+        
+    except Exception as e:
+        logger.error(f"Error updating unified HTML after refresh: {e}")

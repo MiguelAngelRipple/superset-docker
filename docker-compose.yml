@@ -88,6 +88,8 @@ services:
       - redis
     volumes:
       - ./superset_config_override.py:/app/pythonpath/superset_config.py
+      - ./superset_home:/app/superset_home
+      - ./docker-init.sh:/docker-init.sh
     environment:
       - SUPERSET_SECRET_KEY=${SUPERSET_SECRET_KEY}
       - SUPERSET_ADMIN_USERNAME=${SUPERSET_ADMIN_USERNAME}
@@ -104,9 +106,6 @@ services:
       - DATABASE_DB=${POSTGRES_DB}
       - REDIS_HOST=${REDIS_HOST}
       - REDIS_PORT=${REDIS_PORT}
-    volumes:
-      - ./superset_home:/app/superset_home
-      - ./docker-init.sh:/docker-init.sh
     command: ["bash", "/docker-init.sh"]
     restart: "no"
 
@@ -130,6 +129,9 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
       AWS_BUCKET_NAME: ${AWS_BUCKET_NAME}
+      # URL refresh configuration
+      ENABLE_URL_REFRESH: ${ENABLE_URL_REFRESH:-true}
+      URL_REFRESH_THRESHOLD_HOURS: ${URL_REFRESH_THRESHOLD_HOURS:-2}
     restart: unless-stopped
     volumes:
       - ./okd_sync:/app

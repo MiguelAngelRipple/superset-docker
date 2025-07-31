@@ -64,6 +64,12 @@ SYNC_INTERVAL = int(os.getenv("SYNC_INTERVAL", "60"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "10"))
 PRIORITIZE_NEW = os.getenv("PRIORITIZE_NEW", "true").lower() == "true"
 
+# URL Refresh settings
+# How many hours before expiration to refresh URLs (default: 2 hours)
+URL_REFRESH_THRESHOLD_HOURS = int(os.getenv("URL_REFRESH_THRESHOLD_HOURS", "2"))
+# Enable/disable automatic URL refresh (default: enabled)
+ENABLE_URL_REFRESH = os.getenv("ENABLE_URL_REFRESH", "true").lower() == "true"
+
 # Database table names
 MAIN_TABLE = "GRARentalDataCollection"
 PERSON_DETAILS_TABLE = "GRARentalDataCollection_person_details"

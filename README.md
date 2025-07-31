@@ -62,11 +62,22 @@ POSTGRES_PORT=5432
 POSTGRES_INTERNAL_PORT=5432
 
 # Variables for okd_sync
-PG_DB=Submissions
-PG_USER=postgres
-PG_PASS=postgres
-PG_HOST=postgres
-PG_PORT=5432
+AWS_ACCESS_KEY_ID=your_aws_access_key
+AWS_SECRET_ACCESS_KEY=your_aws_secret_key
+AWS_DEFAULT_REGION=af-south-1
+AWS_BUCKET_NAME=your_s3_bucket_name
+
+# ODK Central configuration
+ODK_CENTRAL_URL=https://your-odk-central.com
+ODK_CENTRAL_EMAIL=your_email@example.com
+ODK_CENTRAL_PASSWORD=your_password
+ODK_PROJECT_ID=your_project_id
+ODK_FORM_ID=your_form_id
+
+# Sync configuration
+SYNC_INTERVAL=60
+MAX_WORKERS=10
+PRIORITIZE_NEW=true
 
 # Superset secret key
 SUPERSET_SECRET_KEY=supersecretkey123456789
@@ -231,6 +242,65 @@ If data is not being synchronized from ODK Central:
    ```bash
    docker-compose run --rm okd_sync python main.py
    ```
+
+## 🔄 URL Refresh System
+
+**Problem Solved**: S3 signed URLs expire after 24 hours, causing images to become inaccessible in Superset.
+
+**Solution**: The system now includes an automatic URL refresh mechanism that:
+
+### 🛠️ **How It Works**
+
+1. **Automatic Detection**: During each sync cycle, the system checks all existing image URLs in the database
+2. **Expiration Check**: URLs that will expire within the configured threshold (default: 2 hours) are identified
+3. **Parallel Refresh**: Expired URLs are regenerated using parallel processing for efficiency
+4. **Database Update**: Both the `building_image_url` and `building_image_url_html` fields are updated
+5. **Logging**: Complete logging of the refresh process for monitoring and debugging
+
+### ⚙️ **Configuration Options**
+
+Add these variables to your `.env` file:
+
+```bash
+# Enable/disable automatic URL refresh (default: true)
+ENABLE_URL_REFRESH=true
+
+# Hours before expiration to refresh URLs (default: 2)
+URL_REFRESH_THRESHOLD_HOURS=2
+```
+
+### 🔍 **Monitoring**
+
+The URL refresh process provides detailed logging:
+
+```bash
+# View refresh activity
+docker-compose logs -f okd_sync | grep "URL refresh"
+
+# Example log output:
+# [INFO] Checking for expired image URLs that need refreshing...
+# [INFO] Found 45 records with image URLs to check
+# [INFO] Found 12 URLs that need refreshing
+# [INFO] Refreshed URL for submission abc123-def456
+# [INFO] Successfully refreshed 12 URLs in database
+# [INFO] Refreshed 12 expired image URLs
+```
+
+### 🚀 **Benefits**
+
+- **Zero Downtime**: Images remain accessible 24/7 without manual intervention
+- **Performance Optimized**: Only refreshes URLs that are actually expiring
+- **Configurable**: Adjust refresh timing based on your usage patterns
+- **Error Resilient**: Continues sync process even if URL refresh encounters issues
+- **Resource Efficient**: Uses parallel processing to minimize refresh time
+
+### 🔧 **Technical Details**
+
+- **Refresh Frequency**: Runs during every sync cycle (default: every 60 seconds)
+- **Threshold Logic**: Refreshes URLs that expire within 2 hours (configurable)
+- **Parallel Processing**: Uses multiple workers for concurrent URL regeneration
+- **HTML Sync**: Automatically updates the HTML field after URL refresh
+- **Database Integrity**: Uses transactions to ensure consistent updates
 
 ## Maintenance
 

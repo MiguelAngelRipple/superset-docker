@@ -5,6 +5,7 @@ import logging
 import json
 import os
 import sys
+from datetime import datetime
 
 # Add the parent directory to sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -66,6 +67,31 @@ def process_submission(submission):
     # Ensure UUID field exists
     if '__id' in submission and not submission.get('UUID'):
         submission['UUID'] = submission['__id']
+    
+    # Extract submissionDate from __system and add as SubmittedDate for tracking
+    if '__system' in submission and submission['__system']:
+        system_data = submission['__system']
+        
+        # Parse JSON string if needed
+        if isinstance(system_data, str):
+            try:
+                system_data = json.loads(system_data)
+            except:
+                logger.warning(f"Could not parse __system as JSON for submission {submission.get('UUID')}")
+                system_data = {}
+        
+        # Extract submissionDate and convert to datetime
+        if isinstance(system_data, dict) and 'submissionDate' in system_data:
+            submission_date_str = system_data.get('submissionDate')
+            if submission_date_str:
+                try:
+                    # Parse the ISO timestamp and convert to datetime
+                    # Remove 'Z' and replace with '+00:00' for proper parsing
+                    submission_date_str = submission_date_str.replace('Z', '+00:00')
+                    submission['SubmittedDate'] = datetime.fromisoformat(submission_date_str)
+                    logger.debug(f"Extracted SubmittedDate: {submission['SubmittedDate']} for submission {submission.get('UUID')}")
+                except Exception as e:
+                    logger.warning(f"Could not parse submissionDate '{submission_date_str}' for submission {submission.get('UUID')}: {e}")
     
     # Process JSON fields
     for field in ['property_description']:
