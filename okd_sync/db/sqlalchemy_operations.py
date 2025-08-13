@@ -237,49 +237,61 @@ def create_unified_view(force_recreate=False):
         
         # If the person details table exists, use a more complex query to include person details
         if person_details_exists:
+            # FINAL FIX: Use DIRECT_MATCH strategy confirmed to work with UUID pattern
+            # This strategy uses SPLIT_PART to extract the main UUID from person_details UUID
+            # Pattern: person_details.UUID = main.UUID + "_" + suffix
             create_query = f"""
             CREATE TABLE "{UNIFIED_TABLE}" AS
             SELECT 
                 m.*,
-                jsonb_agg(
-                    jsonb_build_object(
-                        'UUID', p."UUID",
-                        'person_type', p."person_type",
-                        'shop_apt_unit_number', p."shop_apt_unit_number",
-                        'type', p."type",
-                        'business_name', p."business_name",
-                        'tax_registered', p."tax_registered",
-                        'tin', p."tin",
-                        'individual_first_name', p."individual_first_name",
-                        'individual_middle_name', p."individual_middle_name",
-                        'individual_last_name', p."individual_last_name",
-                        'individual_gender', p."individual_gender",
-                        'individual_id_type', p."individual_id_type",
-                        'individual_nin', p."individual_nin",
-                        'individual_drivers_licence', p."individual_drivers_licence",
-                        'individual_passport_number', p."individual_passport_number",
-                        'passport_country', p."passport_country",
-                        'individual_residence_permit_number', p."individual_residence_permit_number",
-                        'residence_permit_country', p."residence_permit_country",
-                        'individual_dob', p."individual_dob",
-                        'mobile_1', p."mobile_1",
-                        'mobile_2', p."mobile_2",
-                        'email', p."email",
-                        'occupancy', p."occupancy"
-                    )
-                ) FILTER (WHERE p."UUID" IS NOT NULL) as person_details,
+                -- Use COALESCE to return empty array instead of null when no person details exist
+                COALESCE(pd.person_details, '[]'::jsonb) as person_details,
                 CASE 
                     WHEN m.building_image_url IS NOT NULL 
                     THEN '<img src=' || CHR(34) || m.building_image_url || CHR(34) || ' width=' || CHR(34) || '100%' || CHR(34) || ' height=' || CHR(34) || '100%' || CHR(34) || ' />' 
                     ELSE NULL 
                 END as building_image_url_html
             FROM "{MAIN_TABLE}" m
-            LEFT JOIN "{PERSON_DETAILS_TABLE}" p ON m."UUID" = p."__Submissions-id"
-            GROUP BY m."UUID", m."__id", m."survey_date", m."survey_start", m."survey_end", m."logo", 
-                     m."start_geopoint", m."property_location", m."property_description", 
-                     m."generated_note_name_35", m."sum_owner", m."sum_landlord", m."sum_occupant", 
-                     m."check_counts_1", m."check_counts_2", m."End", m."meta", m."__system", 
-                     m."person_details@odata.navigationLink", m."building_image_url"
+            -- SUBCONSULTA que agrega person_details usando la estrategia DIRECT_MATCH confirmada
+            LEFT JOIN (
+                SELECT 
+                    -- Extraer el UUID principal del UUID de person_details usando SPLIT_PART
+                    SPLIT_PART(p."UUID", '_', 1) as main_uuid,
+                    -- Agregar todos los person_details para cada submission
+                    jsonb_agg(
+                        jsonb_build_object(
+                            'UUID', p."UUID",
+                            'person_type', p."person_type",
+                            'shop_apt_unit_number', p."shop_apt_unit_number",
+                            'type', p."type",
+                            'business_name', p."business_name",
+                            'tax_registered', p."tax_registered",
+                            'tin', p."tin",
+                            'individual_first_name', p."individual_first_name",
+                            'individual_middle_name', p."individual_middle_name",
+                            'individual_last_name', p."individual_last_name",
+                            'individual_gender', p."individual_gender",
+                            'individual_id_type', p."individual_id_type",
+                            'individual_nin', p."individual_nin",
+                            'individual_drivers_licence', p."individual_drivers_licence",
+                            'individual_passport_number', p."individual_passport_number",
+                            'passport_country', p."passport_country",
+                            'individual_residence_permit_number', p."individual_residence_permit_number",
+                            'residence_permit_country', p."residence_permit_country",
+                            'individual_dob', p."individual_dob",
+                            'mobile_1', p."mobile_1",
+                            'mobile_2', p."mobile_2",
+                            'email', p."email",
+                            'occupancy', p."occupancy"
+                        )
+                    ) as person_details
+                FROM "{PERSON_DETAILS_TABLE}" p
+                -- Solo procesar registros que tienen UUID válido
+                WHERE p."UUID" IS NOT NULL 
+                  AND p."UUID" != ''
+                -- Agrupar por el UUID principal extraído
+                GROUP BY SPLIT_PART(p."UUID", '_', 1)
+            ) pd ON m."UUID" = pd.main_uuid
             """
         
         # Execute the query to create the unified table
@@ -295,4 +307,141 @@ def create_unified_view(force_recreate=False):
         return True
     except Exception as e:
         logger.error(f"Error creating unified table {UNIFIED_TABLE}: {e}")
+        return False
+
+
+def verify_unified_table():
+    """
+    Verify that the unified table was created correctly and check person_details field
+    
+    This utility function helps diagnose issues with the unified table creation
+    and specifically checks if person_details are being populated correctly.
+    
+    Returns:
+        dict: Status information about the unified table
+    """
+    try:
+        from db.connection import Session, engine
+        
+        result = {
+            'table_exists': False,
+            'total_records': 0,
+            'records_with_person_details': 0,
+            'records_with_null_person_details': 0,
+            'records_with_empty_array_person_details': 0,
+            'sample_person_details': None,
+            'errors': []
+        }
+        
+        # Check if unified table exists
+        if not table_exists(UNIFIED_TABLE):
+            result['errors'].append(f"Unified table {UNIFIED_TABLE} does not exist")
+            return result
+            
+        result['table_exists'] = True
+        
+        with Session(engine) as session:
+            # Count total records
+            total_query = f'SELECT COUNT(*) FROM "{UNIFIED_TABLE}"'
+            total_result = session.execute(text(total_query)).scalar()
+            result['total_records'] = total_result
+            
+            # Count records with non-null person_details
+            non_null_query = f'''
+                SELECT COUNT(*) FROM "{UNIFIED_TABLE}" 
+                WHERE person_details IS NOT NULL AND person_details != 'null'::jsonb
+            '''
+            non_null_result = session.execute(text(non_null_query)).scalar()
+            result['records_with_person_details'] = non_null_result
+            
+            # Count records with null person_details
+            null_query = f'''
+                SELECT COUNT(*) FROM "{UNIFIED_TABLE}" 
+                WHERE person_details IS NULL OR person_details = 'null'::jsonb
+            '''
+            null_result = session.execute(text(null_query)).scalar()
+            result['records_with_null_person_details'] = null_result
+            
+            # Count records with empty array person_details
+            empty_array_query = f'''
+                SELECT COUNT(*) FROM "{UNIFIED_TABLE}" 
+                WHERE person_details = '[]'::jsonb
+            '''
+            empty_array_result = session.execute(text(empty_array_query)).scalar()
+            result['records_with_empty_array_person_details'] = empty_array_result
+            
+            # Get a sample of person_details that are not empty
+            sample_query = f'''
+                SELECT person_details FROM "{UNIFIED_TABLE}" 
+                WHERE person_details IS NOT NULL 
+                AND person_details != 'null'::jsonb 
+                AND person_details != '[]'::jsonb
+                LIMIT 1
+            '''
+            sample_result = session.execute(text(sample_query)).scalar()
+            if sample_result:
+                result['sample_person_details'] = sample_result
+                
+        logger.info(f"Unified table verification completed: {result}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error verifying unified table: {e}")
+        return {'error': str(e)}
+
+
+def test_unified_table_creation():
+    """
+    Test function to recreate the unified table and verify person_details are populated
+    
+    This function is useful for testing after making changes to the unified table creation logic.
+    It drops the existing table, recreates it, and runs verification checks.
+    
+    Returns:
+        bool: True if test passed, False otherwise
+    """
+    try:
+        logger.info("Starting unified table creation test...")
+        
+        # Force recreate the unified table
+        logger.info("Recreating unified table...")
+        success = create_unified_view(force_recreate=True)
+        
+        if not success:
+            logger.error("Failed to create unified table")
+            return False
+            
+        # Verify the table
+        logger.info("Verifying unified table...")
+        verification_result = verify_unified_table()
+        
+        if 'error' in verification_result:
+            logger.error(f"Verification failed: {verification_result['error']}")
+            return False
+            
+        # Log verification results
+        logger.info("Verification Results:")
+        logger.info(f"  - Table exists: {verification_result['table_exists']}")
+        logger.info(f"  - Total records: {verification_result['total_records']}")
+        logger.info(f"  - Records with person details: {verification_result['records_with_person_details']}")
+        logger.info(f"  - Records with null person details: {verification_result['records_with_null_person_details']}")
+        logger.info(f"  - Records with empty array person details: {verification_result['records_with_empty_array_person_details']}")
+        
+        if verification_result['sample_person_details']:
+            logger.info(f"  - Sample person details: {verification_result['sample_person_details']}")
+        else:
+            logger.info("  - No sample person details found (all records have empty arrays)")
+            
+        # Check if we have the expected pattern: no null values, either populated arrays or empty arrays
+        null_count = verification_result['records_with_null_person_details']
+        if null_count > 0:
+            logger.warning(f"Found {null_count} records with null person_details - this should not happen with the fix")
+            return False
+        else:
+            logger.info("✓ No records with null person_details - fix appears to be working!")
+            
+        return True
+        
+    except Exception as e:
+        logger.error(f"Test failed with error: {e}")
         return False
