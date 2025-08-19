@@ -51,6 +51,44 @@ def extract_building_image(submission):
     
     return None
 
+def extract_address_plus_code(submission):
+    """
+    Extract address_plus_code_image URL from a submission
+    
+    Args:
+        submission: Submission record
+        
+    Returns:
+        str or None: URL of the address plus code image, or None if not found
+    """
+    if not submission:
+        return None
+    
+    # Check property_location field
+    if 'property_location' in submission and submission['property_location']:
+        prop_location = submission['property_location']
+        
+        # Parse JSON string if needed
+        if isinstance(prop_location, str):
+            try:
+                prop_location = json.loads(prop_location)
+            except:
+                logger.warning(f"Could not parse property_location as JSON for submission {submission.get('UUID')}")
+                prop_location = {}
+        
+        # Extract address_plus_code_image (correct field name)
+        if isinstance(prop_location, dict) and 'address_plus_code_image' in prop_location:
+            address_plus_code_image = prop_location.get('address_plus_code_image')
+            if address_plus_code_image and isinstance(address_plus_code_image, str):
+                return address_plus_code_image
+    
+    # Check for address plus code in top-level fields
+    for field, value in submission.items():
+        if 'address' in field.lower() and 'plus' in field.lower() and 'code' in field.lower() and value and isinstance(value, str):
+            return value
+    
+    return None
+
 def process_submission(submission):
     """
     Process a submission record to prepare it for database storage
@@ -94,7 +132,7 @@ def process_submission(submission):
                     logger.warning(f"Could not parse submissionDate '{submission_date_str}' for submission {submission.get('UUID')}: {e}")
     
     # Process JSON fields
-    for field in ['property_description']:
+    for field in ['property_description', 'property_location']:
         if field in submission and isinstance(submission[field], str):
             try:
                 submission[field] = json.loads(submission[field])

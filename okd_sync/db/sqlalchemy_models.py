@@ -52,6 +52,8 @@ class MainSubmission(Base):
     system = Column(JSONB, name="__system")
     person_details_link = Column(String, name="person_details@odata.navigationLink")
     building_image_url = Column(String)
+    # New field for address plus code image from property_location
+    address_plus_code_url = Column(String)
 
 class PersonDetail(Base):
     """Model for the person details table"""
@@ -122,8 +124,12 @@ class UnifiedView(Base):
     __system = Column(JSONB)
     person_details_link = Column(String, name="person_details@odata.navigationLink")
     building_image_url = Column(String)
+    # New field for address plus code image from property_location
+    address_plus_code_url = Column(String)
     person_details = Column(JSONB)
     building_image_url_html = Column(String)
+    # HTML version of address plus code image for display
+    address_plus_code_url_html = Column(String)
 
 def create_tables():
     """Create tables in the database if they don't exist"""

@@ -449,6 +449,35 @@ def extract_building_image(submission):
     
     return None
 
+def extract_address_plus_code(submission):
+    """
+    Extract address_plus_code_image from property_location
+    
+    Args:
+        submission: Submission record
+        
+    Returns:
+        str: Address plus code image URL or filename
+    """
+    if 'property_location' not in submission:
+        return None
+    
+    prop_location = submission['property_location']
+    
+    # Handle string JSON
+    if isinstance(prop_location, str):
+        try:
+            prop_location = json.loads(prop_location)
+        except:
+            logger.warning(f"Could not parse property_location as JSON")
+            return None
+    
+    # Extract address_plus_code_image (correct field name)
+    if isinstance(prop_location, dict) and 'address_plus_code_image' in prop_location:
+        return prop_location.get('address_plus_code_image')
+    
+    return None
+
 def process_attachments(submissions, max_workers=10, prioritize_new=True):
     """
     Process submissions to download attachments, upload them to S3,
@@ -520,6 +549,9 @@ def process_attachments(submissions, max_workers=10, prioritize_new=True):
         submission_id = submission.get('UUID') or submission.get('__id')
         
         try:
+            # Initialize result data for this submission
+            submission_result = {}
+            
             # Process building_image from property_description
             building_image = extract_building_image(submission)
             
@@ -527,12 +559,11 @@ def process_attachments(submissions, max_workers=10, prioritize_new=True):
                 # Upload to S3 and get a signed URL
                 s3_url = download_and_upload_attachment(submission_id, 'building_image', building_image)
                 if s3_url:
-                    # Store both the signed URL and the HTML in the results dictionary
-                    with results_lock:
-                        results_dict[submission_id] = {
-                            'url': s3_url,
-                            'html': generate_image_html(s3_url)
-                        }
+                    # Store building image data
+                    submission_result['building_image'] = {
+                        'url': s3_url,
+                        'html': generate_image_html(s3_url)
+                    }
                     logger.info(f"Uploaded building_image to S3 with signed URL: {s3_url}")
             else:
                 # Try to upload a placeholder if no image was found
@@ -542,13 +573,33 @@ def process_attachments(submissions, max_workers=10, prioritize_new=True):
                     # Upload the placeholder and get a signed URL
                     s3_url = upload_to_s3(placeholder_path, f"placeholders/{submission_id}.png")
                     if s3_url:
-                        # Store both the signed URL and the HTML in the results dictionary
-                        with results_lock:
-                            results_dict[submission_id] = {
-                                'url': s3_url,
-                                'html': generate_image_html(s3_url, is_placeholder=True)
-                            }
+                        # Store building image data
+                        submission_result['building_image'] = {
+                            'url': s3_url,
+                            'html': generate_image_html(s3_url, is_placeholder=True)
+                        }
                         logger.info(f"Uploaded placeholder image to S3 with signed URL: {s3_url}")
+            
+            # Process address_plus_code from property_location
+            address_plus_code = extract_address_plus_code(submission)
+            
+            if address_plus_code:
+                # Upload to S3 and get a signed URL
+                s3_url = download_and_upload_attachment(submission_id, 'address_plus_code', address_plus_code)
+                if s3_url:
+                    # Store address plus code data
+                    submission_result['address_plus_code'] = {
+                        'url': s3_url,
+                        'html': generate_image_html(s3_url)
+                    }
+                    logger.info(f"Uploaded address_plus_code to S3 with signed URL: {s3_url}")
+            else:
+                logger.debug(f"No address_plus_code found for submission {submission_id}")
+            
+            # Store results in the dictionary if we have any data
+            if submission_result:
+                with results_lock:
+                    results_dict[submission_id] = submission_result
             
             return True
         except Exception as e:
@@ -577,18 +628,29 @@ def process_attachments(submissions, max_workers=10, prioritize_new=True):
                     logger.info(f"Processed {processed_count}/{total_count} submissions")
     
     # Update submissions with S3 URLs
-    image_count = 0
+    building_image_count = 0
+    address_plus_code_count = 0
+    
     for submission in submissions:
         submission_id = submission.get('UUID') or submission.get('__id')
         if submission_id in results_dict:
             result = results_dict[submission_id]
-            # Set the URL for the image
-            submission['building_image_url'] = result['url']
-            # No agregamos building_image_url_html aquí ya que no está en el modelo MainSubmission
-            # Este campo se genera en la vista unificada
-            image_count += 1
+            
+            # Handle building image (old format compatibility)
+            if 'url' in result:
+                submission['building_image_url'] = result['url']
+                building_image_count += 1
+            # Handle building image (new format)
+            elif 'building_image' in result:
+                submission['building_image_url'] = result['building_image']['url']
+                building_image_count += 1
+            
+            # Handle address plus code image
+            if 'address_plus_code' in result:
+                submission['address_plus_code_url'] = result['address_plus_code']['url']
+                address_plus_code_count += 1
     
-    logger.info(f"Attachment process completed: {processed_count} submissions processed, {image_count} images uploaded")
+    logger.info(f"Attachment process completed: {processed_count} submissions processed, {building_image_count} building images uploaded, {address_plus_code_count} address plus code images uploaded")
     return submissions
 
 def refresh_expired_urls(max_workers=5):
@@ -597,6 +659,7 @@ def refresh_expired_urls(max_workers=5):
     
     This function checks existing database records for URLs that are expired
     or will expire soon (configurable threshold) and regenerates fresh signed URLs.
+    Now includes both building_image_url and address_plus_code_url fields.
     
     Args:
         max_workers: Maximum number of concurrent workers for parallel processing
@@ -620,10 +683,16 @@ def refresh_expired_urls(max_workers=5):
     # Get records with image URLs from database
     session = Session(engine)
     try:
-        # Get all records that have building_image_url
+        # Get all records that have building_image_url or address_plus_code_url
         records = session.query(MainSubmission).filter(
-            MainSubmission.building_image_url.isnot(None),
-            MainSubmission.building_image_url != ''
+            (
+                MainSubmission.building_image_url.isnot(None) &
+                (MainSubmission.building_image_url != '')
+            ) |
+            (
+                MainSubmission.address_plus_code_url.isnot(None) &
+                (MainSubmission.address_plus_code_url != '')
+            )
         ).all()
         
         logger.info(f"Found {len(records)} records with image URLs to check")
@@ -663,7 +732,19 @@ def refresh_expired_urls(max_workers=5):
         # Filter records that need URL refresh
         records_to_refresh = []
         for record in records:
-            if is_url_expired_soon(record.building_image_url):
+            needs_refresh = False
+            
+            # Check building_image_url if it exists
+            if record.building_image_url and record.building_image_url.strip():
+                if is_url_expired_soon(record.building_image_url):
+                    needs_refresh = True
+            
+            # Check address_plus_code_url if it exists
+            if record.address_plus_code_url and record.address_plus_code_url.strip():
+                if is_url_expired_soon(record.address_plus_code_url):
+                    needs_refresh = True
+            
+            if needs_refresh:
                 records_to_refresh.append(record)
         
         logger.info(f"Found {len(records_to_refresh)} URLs that need refreshing")
@@ -672,66 +753,96 @@ def refresh_expired_urls(max_workers=5):
             logger.info("No URLs need refreshing at this time")
             return 0
         
-        # Function to refresh a single record's URL
+        # Function to refresh a single record's URLs
         def refresh_single_url(record):
-            try:
-                # Extract S3 key from the existing URL
-                url = record.building_image_url
-                
-                # Parse S3 key from URL - handle both path styles
-                if AWS_BUCKET_NAME in url:
-                    # Extract key after bucket name
-                    if f"{AWS_BUCKET_NAME}.s3." in url:
-                        # Virtual hosted-style URL
-                        key_match = re.search(f'https://{re.escape(AWS_BUCKET_NAME)}\\.s3\\.[^/]+/([^?]+)', url)
-                    else:
-                        # Path-style URL
-                        key_match = re.search(f'/{re.escape(AWS_BUCKET_NAME)}/([^?]+)', url)
-                    
-                    if key_match:
-                        s3_key = key_match.group(1)
-                        
-                        # URL decode the S3 key to prevent double encoding
-                        # This is critical because the extracted key might already be URL encoded
-                        # We need to decode multiple times in case of nested encoding
-                        from urllib.parse import unquote
-                        
-                        # Keep unquoting until no more changes occur (handles multiple encoding levels)
-                        original_key = s3_key
-                        previous_key = None
-                        decode_attempts = 0
-                        
-                        while previous_key != s3_key and decode_attempts < 10:  # Safety limit
-                            previous_key = s3_key
-                            s3_key = unquote(s3_key)
-                            decode_attempts += 1
-                        
-                        logger.info(f"S3 key decoding: '{original_key}' -> '{s3_key}' (attempts: {decode_attempts})")
-                        
-                        # Generate new signed URL
-                        new_signed_url = generate_signed_url(s3_key)
-                        
-                        if new_signed_url:
-                            # Update record in database
-                            record.building_image_url = new_signed_url
-                            logger.info(f"Refreshed URL for submission {record.UUID}")
-                            return True
-                        else:
-                            logger.error(f"Failed to generate new signed URL for {record.UUID}")
-                            return False
-                    else:
-                        logger.error(f"Could not extract S3 key from URL: {url}")
-                        return False
-                else:
-                    logger.error(f"URL does not contain expected bucket name: {url}")
+            """
+            Refresh URLs for a single record. Handles both building_image_url 
+            and address_plus_code_url fields.
+            
+            Returns:
+                int: Number of URLs successfully refreshed (0, 1, or 2)
+            """
+            refresh_count = 0
+            
+            # Helper function to refresh a single URL field
+            def refresh_url_field(url, field_name):
+                if not url or not url.strip():
                     return False
                     
+                try:
+                    # Parse S3 key from URL - handle both path styles
+                    if AWS_BUCKET_NAME in url:
+                        # Extract key after bucket name
+                        if f"{AWS_BUCKET_NAME}.s3." in url:
+                            # Virtual hosted-style URL
+                            key_match = re.search(f'https://{re.escape(AWS_BUCKET_NAME)}\\.s3\\.[^/]+/([^?]+)', url)
+                        else:
+                            # Path-style URL
+                            key_match = re.search(f'/{re.escape(AWS_BUCKET_NAME)}/([^?]+)', url)
+                        
+                        if key_match:
+                            s3_key = key_match.group(1)
+                            
+                            # URL decode the S3 key to prevent double encoding
+                            # This is critical because the extracted key might already be URL encoded
+                            # We need to decode multiple times in case of nested encoding
+                            from urllib.parse import unquote
+                            
+                            # Keep unquoting until no more changes occur (handles multiple encoding levels)
+                            original_key = s3_key
+                            previous_key = None
+                            decode_attempts = 0
+                            
+                            while previous_key != s3_key and decode_attempts < 10:  # Safety limit
+                                previous_key = s3_key
+                                s3_key = unquote(s3_key)
+                                decode_attempts += 1
+                            
+                            logger.debug(f"S3 key decoding for {field_name}: '{original_key}' -> '{s3_key}' (attempts: {decode_attempts})")
+                            
+                            # Generate new signed URL
+                            new_signed_url = generate_signed_url(s3_key)
+                            
+                            if new_signed_url:
+                                # Update record in database
+                                setattr(record, field_name, new_signed_url)
+                                logger.info(f"Refreshed {field_name} URL for submission {record.UUID}")
+                                return True
+                            else:
+                                logger.error(f"Failed to generate new signed URL for {field_name} in {record.UUID}")
+                                return False
+                        else:
+                            logger.error(f"Could not extract S3 key from {field_name} URL: {url}")
+                            return False
+                    else:
+                        logger.error(f"{field_name} URL does not contain expected bucket name: {url}")
+                        return False
+                        
+                except Exception as e:
+                    logger.error(f"Error refreshing {field_name} URL for record {record.UUID}: {e}")
+                    return False
+            
+            try:
+                # Refresh building_image_url if it exists and needs refresh
+                if record.building_image_url and record.building_image_url.strip():
+                    if is_url_expired_soon(record.building_image_url):
+                        if refresh_url_field(record.building_image_url, 'building_image_url'):
+                            refresh_count += 1
+                
+                # Refresh address_plus_code_url if it exists and needs refresh
+                if record.address_plus_code_url and record.address_plus_code_url.strip():
+                    if is_url_expired_soon(record.address_plus_code_url):
+                        if refresh_url_field(record.address_plus_code_url, 'address_plus_code_url'):
+                            refresh_count += 1
+                
+                return refresh_count
+                
             except Exception as e:
-                logger.error(f"Error refreshing URL for record {record.UUID}: {e}")
-                return False
+                logger.error(f"Error refreshing URLs for record {record.UUID}: {e}")
+                return 0
         
         # Process URLs in parallel
-        refreshed_count = 0
+        total_refreshed_count = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_record = {
                 executor.submit(refresh_single_url, record): record 
@@ -741,18 +852,17 @@ def refresh_expired_urls(max_workers=5):
             for future in concurrent.futures.as_completed(future_to_record):
                 record = future_to_record[future]
                 try:
-                    success = future.result()
-                    if success:
-                        refreshed_count += 1
+                    refresh_count = future.result()
+                    total_refreshed_count += refresh_count
                 except Exception as e:
                     logger.error(f"Error in URL refresh thread for {record.UUID}: {e}")
         
         # Commit all changes
-        if refreshed_count > 0:
+        if total_refreshed_count > 0:
             session.commit()
-            logger.info(f"Successfully refreshed {refreshed_count} URLs in database")
+            logger.info(f"Successfully refreshed {total_refreshed_count} URLs in database")
         
-        return refreshed_count
+        return total_refreshed_count
         
     except Exception as e:
         logger.error(f"Error in refresh_expired_urls: {e}")
@@ -763,10 +873,12 @@ def refresh_expired_urls(max_workers=5):
 
 def update_unified_html_after_refresh():
     """
-    Update the building_image_url_html field in the unified table after URL refresh.
+    Update both building_image_url_html and address_plus_code_url_html fields 
+    in the unified table after URL refresh.
     
     This function regenerates the HTML img tags for all records that have
-    building_image_url to ensure the HTML field contains the latest URLs.
+    building_image_url or address_plus_code_url to ensure the HTML fields 
+    contain the latest URLs.
     """
     try:
         from db.connection import execute_query
@@ -774,23 +886,35 @@ def update_unified_html_after_refresh():
         
         logger.info("Updating HTML fields in unified table after URL refresh...")
         
-        # SQL to update building_image_url_html based on building_image_url
+        # SQL to update both building_image_url_html and address_plus_code_url_html
         # Use double quotes around table name to preserve case in PostgreSQL
         update_sql = f"""
         UPDATE "{UNIFIED_TABLE}" 
-        SET building_image_url_html = CASE 
-            WHEN building_image_url IS NOT NULL AND building_image_url != '' THEN
-                '<img src="' || building_image_url || '" 
-                style="max-width: 100%; height: auto; border-radius: 4px; 
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);" 
-                onerror="this.style.display=''none''" />'
-            ELSE NULL
-        END
-        WHERE building_image_url IS NOT NULL AND building_image_url != '';
+        SET 
+            building_image_url_html = CASE 
+                WHEN building_image_url IS NOT NULL AND building_image_url != '' THEN
+                    '<img src="' || building_image_url || '" 
+                    style="max-width: 100%; height: auto; border-radius: 4px; 
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);" 
+                    onerror="this.style.display=''none''" />'
+                ELSE NULL
+            END,
+            address_plus_code_url_html = CASE 
+                WHEN address_plus_code_url IS NOT NULL AND address_plus_code_url != '' THEN
+                    '<img src="' || address_plus_code_url || '" 
+                    style="max-width: 100%; height: auto; border-radius: 4px; 
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);" 
+                    onerror="this.style.display=''none''" />'
+                ELSE NULL
+            END
+        WHERE 
+            (building_image_url IS NOT NULL AND building_image_url != '') 
+            OR 
+            (address_plus_code_url IS NOT NULL AND address_plus_code_url != '');
         """
         
         result = execute_query(update_sql)
-        logger.info("Successfully updated HTML fields in unified table")
+        logger.info("Successfully updated both building and address plus code HTML fields in unified table")
         
     except Exception as e:
         logger.error(f"Error updating unified HTML after refresh: {e}")

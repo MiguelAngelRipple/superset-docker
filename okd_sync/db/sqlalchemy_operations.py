@@ -231,7 +231,12 @@ def create_unified_view(force_recreate=False):
                 WHEN m.building_image_url IS NOT NULL 
                 THEN '<img src=' || CHR(34) || m.building_image_url || CHR(34) || ' width=' || CHR(34) || '100%' || CHR(34) || ' height=' || CHR(34) || '100%' || CHR(34) || ' />' 
                 ELSE NULL 
-            END as building_image_url_html
+            END as building_image_url_html,
+            CASE 
+                WHEN m.address_plus_code_url IS NOT NULL 
+                THEN '<img src=' || CHR(34) || m.address_plus_code_url || CHR(34) || ' width=' || CHR(34) || '100%' || CHR(34) || ' height=' || CHR(34) || '100%' || CHR(34) || ' />' 
+                ELSE NULL 
+            END as address_plus_code_url_html
         FROM "{MAIN_TABLE}" m
         """
         
@@ -250,7 +255,12 @@ def create_unified_view(force_recreate=False):
                     WHEN m.building_image_url IS NOT NULL 
                     THEN '<img src=' || CHR(34) || m.building_image_url || CHR(34) || ' width=' || CHR(34) || '100%' || CHR(34) || ' height=' || CHR(34) || '100%' || CHR(34) || ' />' 
                     ELSE NULL 
-                END as building_image_url_html
+                END as building_image_url_html,
+                CASE 
+                    WHEN m.address_plus_code_url IS NOT NULL 
+                    THEN '<img src=' || CHR(34) || m.address_plus_code_url || CHR(34) || ' width=' || CHR(34) || '100%' || CHR(34) || ' height=' || CHR(34) || '100%' || CHR(34) || ' />' 
+                    ELSE NULL 
+                END as address_plus_code_url_html
             FROM "{MAIN_TABLE}" m
             -- SUBCONSULTA que agrega person_details usando la estrategia DIRECT_MATCH confirmada
             LEFT JOIN (
