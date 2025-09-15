@@ -5,7 +5,7 @@ This version replaces file-based last_sync.txt with database tracking
 """
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import sys
 import os

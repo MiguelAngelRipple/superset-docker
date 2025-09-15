@@ -54,6 +54,8 @@ class MainSubmission(Base):
     building_image_url = Column(String)
     # New field for address plus code image from property_location
     address_plus_code_url = Column(String)
+    # Submitted date for sync tracking
+    SubmittedDate = Column(DateTime)
 
 class PersonDetail(Base):
     """Model for the person details table"""
