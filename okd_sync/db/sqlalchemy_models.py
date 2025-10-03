@@ -103,10 +103,13 @@ class PersonDetail(Base):
         return self.submissions_id
 
 class UnifiedView(Base):
-    """Model for the unified table"""
+    """Model for the unified table with composite primary key"""
     __tablename__ = UNIFIED_TABLE
-    
-    UUID = Column(String, primary_key=True)
+
+    # Composite primary key: submission UUID + person UUID
+    UUID = Column(String, primary_key=True)  # Submission UUID
+    person_uuid = Column(String, name="Person UUID", primary_key=True)  # Person UUID
+
     __id = Column(String)
     survey_date = Column(DateTime)
     survey_start = Column(DateTime)

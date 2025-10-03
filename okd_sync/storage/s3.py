@@ -27,7 +27,11 @@ from config import (
     ODK_CENTRAL_PASSWORD,
     ODK_PROJECT_ID,
     ODK_FORM_ID,
-    ODK_BASE_URL
+    ODK_BASE_URL,
+    S3_BASE_FOLDER,
+    S3_BUILDING_IMAGES_FOLDER,
+    S3_ADDRESS_PLUS_CODE_FOLDER,
+    S3_PLACEHOLDERS_FOLDER
 )
 
 # Logging configuration
@@ -113,6 +117,35 @@ def get_odk_session():
     except Exception as e:
         logger.error(f"Error authenticating with ODK Central: {e}")
         return None
+
+
+def generate_s3_file_path(submission_id, attachment_field, filename):
+    """
+    Generate S3 file path based on attachment field type
+    
+    Args:
+        submission_id: ID of the submission
+        attachment_field: Type of attachment ('building_image' or 'address_plus_code')
+        filename: Name of the file
+        
+    Returns:
+        str: S3 file path
+    """
+    # Determine the appropriate subfolder based on attachment field
+    if attachment_field == 'building_image':
+        subfolder = S3_BUILDING_IMAGES_FOLDER
+    elif attachment_field == 'address_plus_code':
+        subfolder = S3_ADDRESS_PLUS_CODE_FOLDER
+    else:
+        # Default to building images folder for unknown types
+        subfolder = S3_BUILDING_IMAGES_FOLDER
+        logger.warning(f"Unknown attachment field '{attachment_field}', using building images folder")
+    
+    # Generate the full S3 path: base_folder/subfolder/submission_id-filename
+    s3_file_path = f"{S3_BASE_FOLDER}/{subfolder}/{submission_id}-{filename}"
+    
+    logger.debug(f"Generated S3 path for {attachment_field}: {s3_file_path}")
+    return s3_file_path
 
 
 def generate_signed_url(s3_key, expires=86400):
@@ -274,7 +307,7 @@ def download_and_upload_attachment(submission_id, attachment_field, attachment_u
         if os.path.exists(local_path):
             logger.info(f"Found local file at {local_path}")
             # Upload the local file to S3 and get a signed URL
-            s3_file_name = f"odk_images/{datetime.now().strftime('%Y-%m')}/{submission_id}-{attachment_url}"
+            s3_file_name = generate_s3_file_path(submission_id, attachment_field, attachment_url)
             return upload_to_s3(local_path, s3_file_name)
         
         # If not found locally, try to construct the ODK Central URL
@@ -320,7 +353,7 @@ def download_and_upload_attachment(submission_id, attachment_field, attachment_u
                 logger.warning(f"Downloaded file is too small ({file_size} bytes), might be corrupted")
             
             # Upload the file to S3 and get a signed URL
-            s3_file_name = f"odk_images/{datetime.now().strftime('%Y-%m')}/{submission_id}-{os.path.basename(attachment_url)}"
+            s3_file_name = generate_s3_file_path(submission_id, attachment_field, os.path.basename(attachment_url))
             s3_url = upload_to_s3(temp_file.name, s3_file_name)
             
             # Clean up the temporary file
@@ -571,7 +604,7 @@ def process_attachments(submissions, max_workers=10, prioritize_new=True):
                 placeholder_path = create_placeholder_image(submission_id)
                 if placeholder_path:
                     # Upload the placeholder and get a signed URL
-                    s3_url = upload_to_s3(placeholder_path, f"placeholders/{submission_id}.png")
+                    s3_url = upload_to_s3(placeholder_path, f"{S3_BASE_FOLDER}/{S3_PLACEHOLDERS_FOLDER}/{submission_id}.png")
                     if s3_url:
                         # Store building image data
                         submission_result['building_image'] = {
@@ -873,48 +906,106 @@ def refresh_expired_urls(max_workers=5):
 
 def update_unified_html_after_refresh():
     """
-    Update both building_image_url_html and address_plus_code_url_html fields 
+    Update both building_image_url_html and address_plus_code_url_html fields
     in the unified table after URL refresh.
-    
+
     This function regenerates the HTML img tags for all records that have
-    building_image_url or address_plus_code_url to ensure the HTML fields 
+    building_image_url or address_plus_code_url to ensure the HTML fields
     contain the latest URLs.
+
+    Note: With the new optimized unified table, HTML fields are generated
+    directly in the query, so this function may not be needed. It will
+    check if the required columns exist before attempting updates.
     """
     try:
-        from db.connection import execute_query
+        from db.connection import execute_query, table_exists
         from config import UNIFIED_TABLE
-        
-        logger.info("Updating HTML fields in unified table after URL refresh...")
-        
-        # SQL to update both building_image_url_html and address_plus_code_url_html
-        # Use double quotes around table name to preserve case in PostgreSQL
-        update_sql = f"""
-        UPDATE "{UNIFIED_TABLE}" 
-        SET 
-            building_image_url_html = CASE 
-                WHEN building_image_url IS NOT NULL AND building_image_url != '' THEN
-                    '<img src="' || building_image_url || '" 
-                    style="max-width: 100%; height: auto; border-radius: 4px; 
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);" 
-                    onerror="this.style.display=''none''" />'
-                ELSE NULL
-            END,
-            address_plus_code_url_html = CASE 
-                WHEN address_plus_code_url IS NOT NULL AND address_plus_code_url != '' THEN
-                    '<img src="' || address_plus_code_url || '" 
-                    style="max-width: 100%; height: auto; border-radius: 4px; 
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);" 
-                    onerror="this.style.display=''none''" />'
-                ELSE NULL
-            END
-        WHERE 
-            (building_image_url IS NOT NULL AND building_image_url != '') 
-            OR 
-            (address_plus_code_url IS NOT NULL AND address_plus_code_url != '');
+
+        logger.info("Checking if HTML field update is needed after URL refresh...")
+
+        # First, check if the unified table exists
+        if not table_exists(UNIFIED_TABLE):
+            logger.warning(f"Unified table {UNIFIED_TABLE} does not exist. Skipping HTML update.")
+            return
+
+        # Check if the required columns exist in the unified table
+        # The new optimized query generates HTML fields directly, so these columns may not exist
+        column_check_query = f"""
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_name = '{UNIFIED_TABLE}'
+        AND column_name IN ('building_image_url', 'address_plus_code_url', 'building_image_url_html', 'address_plus_code_url_html')
         """
-        
+
+        column_result = execute_query(column_check_query, fetch=True)
+
+        if not column_result:
+            logger.info("No relevant columns found in unified table. HTML fields are likely generated directly in the optimized query.")
+            return
+
+        existing_columns = [row[0] for row in column_result]
+        logger.info(f"Found columns in unified table: {existing_columns}")
+
+        # Check if we have the source URL columns needed for the update
+        has_building_url = 'building_image_url' in existing_columns
+        has_address_url = 'address_plus_code_url' in existing_columns
+        has_building_html = 'building_image_url_html' in existing_columns
+        has_address_html = 'address_plus_code_url_html' in existing_columns
+
+        if not (has_building_url or has_address_url):
+            logger.info("No source URL columns found. HTML fields are generated directly in the optimized query.")
+            return
+
+        if not (has_building_html or has_address_html):
+            logger.info("No HTML columns found to update. HTML fields are generated directly in the optimized query.")
+            return
+
+        logger.info("Updating HTML fields in unified table after URL refresh...")
+
+        # Build dynamic UPDATE statement based on available columns
+        update_parts = []
+        where_conditions = []
+
+        if has_building_url and has_building_html:
+            update_parts.append("""
+                building_image_url_html = CASE
+                    WHEN building_image_url IS NOT NULL AND building_image_url != '' THEN
+                        '<img src="' || building_image_url || '"
+                        style="max-width: 100%; height: auto; border-radius: 4px;
+                        box-shadow: 0 2px 4px rgba(0,0,0,0.1);"
+                        onerror="this.style.display=''none''" />'
+                    ELSE NULL
+                END
+            """)
+            where_conditions.append("(building_image_url IS NOT NULL AND building_image_url != '')")
+
+        if has_address_url and has_address_html:
+            update_parts.append("""
+                address_plus_code_url_html = CASE
+                    WHEN address_plus_code_url IS NOT NULL AND address_plus_code_url != '' THEN
+                        '<img src="' || address_plus_code_url || '"
+                        style="max-width: 100%; height: auto; border-radius: 4px;
+                        box-shadow: 0 2px 4px rgba(0,0,0,0.1);"
+                        onerror="this.style.display=''none''" />'
+                    ELSE NULL
+                END
+            """)
+            where_conditions.append("(address_plus_code_url IS NOT NULL AND address_plus_code_url != '')")
+
+        if not update_parts:
+            logger.info("No columns available to update. Skipping HTML field update.")
+            return
+
+        # Construct the final UPDATE statement
+        update_sql = f"""
+        UPDATE "{UNIFIED_TABLE}"
+        SET {', '.join(update_parts)}
+        WHERE {' OR '.join(where_conditions)};
+        """
+
         result = execute_query(update_sql)
-        logger.info("Successfully updated both building and address plus code HTML fields in unified table")
-        
+        logger.info("Successfully updated HTML fields in unified table after URL refresh")
+
     except Exception as e:
         logger.error(f"Error updating unified HTML after refresh: {e}")
+        logger.info("Note: With the new optimized unified table, HTML fields are generated directly in the query and may not need manual updates.")

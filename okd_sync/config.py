@@ -59,6 +59,15 @@ logging.info(f"Using AWS credentials: {masked_key}, region: {AWS_REGION}, bucket
 # Construct the S3 URL prefix correctly with region
 AWS_S3_URL_PREFIX = f"https://{AWS_BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com" if AWS_BUCKET_NAME and AWS_REGION else ""
 
+# S3 folder structure configuration
+# Base folder name for storing ODK images (configurable via environment)
+S3_BASE_FOLDER = os.getenv("S3_BASE_FOLDER", "odk_images")
+
+# Subfolder names following S3 best practices (lowercase with hyphens)
+S3_BUILDING_IMAGES_FOLDER = "building-images"
+S3_ADDRESS_PLUS_CODE_FOLDER = "address-plus-code-images" 
+S3_PLACEHOLDERS_FOLDER = "placeholders"
+
 # Synchronization settings
 SYNC_INTERVAL = int(os.getenv("SYNC_INTERVAL", "60"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "10"))

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from db.connection import execute_query, table_exists
 from db.sqlalchemy_models import engine, MainSubmission, PersonDetail, MAIN_TABLE, PERSON_DETAILS_TABLE, UNIFIED_TABLE
+from db.optimized_unified_query import get_optimized_unified_query, get_performance_indexes
 
 # Logging configuration
 logger = logging.getLogger(__name__)
@@ -183,140 +184,101 @@ def upsert_person_details(records):
 
 def create_unified_view(force_recreate=False):
     """
-    Create a unified view that combines data from the main table and person details table
-    
-    This function creates a materialized table that combines data from the main table
-    (GRARentalDataCollection) with the data from the person details table 
-    (GRARentalDataCollection_person_details). The unified table facilitates querying data
-    in tools like Superset without the need for complex joins.
-    
+    Create an optimized unified table that combines data from the main table and person details table
+
+    This function creates an enhanced physical table using advanced PostgreSQL optimizations,
+    data validation, and business logic calculations. The optimized table provides:
+
+    - Robust JSON data unmerging with validation
+    - Geographic coordinate validation for Gambia
+    - Currency conversion with configurable exchange rates
+    - Tax liability calculations
+    - Data quality scoring
+    - Comprehensive field validation (TIN, phone numbers, emails, dates)
+
     Args:
-        force_recreate: If True, drop and recreate the unified view
+        force_recreate: If True, drop and recreate the unified table
     """
     try:
         # Check if the main table exists
         if not table_exists(MAIN_TABLE):
-            logger.error(f"Main table {MAIN_TABLE} does not exist. Cannot create unified view.")
+            logger.error(f"Main table {MAIN_TABLE} does not exist. Cannot create unified table.")
             return False
-        
+
         # Check if the person details table exists
         person_details_exists = table_exists(PERSON_DETAILS_TABLE)
         if not person_details_exists:
-            logger.warning(f"Person details table {PERSON_DETAILS_TABLE} does not exist. Creating unified view with main table only.")
-        
+            logger.warning(f"Person details table {PERSON_DETAILS_TABLE} does not exist. Creating unified table with main table only.")
+
         # Check if the unified table exists
         unified_exists = table_exists(UNIFIED_TABLE)
-        
+
         # If the unified table exists and we're not forcing a recreate, return
         if unified_exists and not force_recreate:
             logger.info(f"Unified table {UNIFIED_TABLE} already exists. Skipping creation.")
             return True
-        
+
         # If the unified table exists and we're forcing a recreate, drop it
         if unified_exists:
             logger.info(f"Dropping existing unified table {UNIFIED_TABLE}")
             drop_query = f"DROP TABLE IF EXISTS \"{UNIFIED_TABLE}\" CASCADE"
             execute_query(drop_query)
-        
-        # Create the unified table
-        logger.info(f"Creating unified table {UNIFIED_TABLE}")
-        
-        # Base query to create the unified table from the main table
+
+        # Create the optimized unified table
+        logger.info(f"Creating optimized unified table {UNIFIED_TABLE}")
+
+        # Get the optimized query
+        optimized_query = get_optimized_unified_query()
+
+        # Create the table using the optimized query
         create_query = f"""
         CREATE TABLE "{UNIFIED_TABLE}" AS
-        SELECT 
-            m.*,
-            NULL::jsonb as person_details,
-            CASE 
-                WHEN m.building_image_url IS NOT NULL 
-                THEN '<img src=' || CHR(34) || m.building_image_url || CHR(34) || ' width=' || CHR(34) || '100%' || CHR(34) || ' height=' || CHR(34) || '100%' || CHR(34) || ' />' 
-                ELSE NULL 
-            END as building_image_url_html,
-            CASE 
-                WHEN m.address_plus_code_url IS NOT NULL 
-                THEN '<img src=' || CHR(34) || m.address_plus_code_url || CHR(34) || ' width=' || CHR(34) || '100%' || CHR(34) || ' height=' || CHR(34) || '100%' || CHR(34) || ' />' 
-                ELSE NULL 
-            END as address_plus_code_url_html
-        FROM "{MAIN_TABLE}" m
+        {optimized_query}
         """
-        
-        # If the person details table exists, use a more complex query to include person details
-        if person_details_exists:
-            # FINAL FIX: Use DIRECT_MATCH strategy confirmed to work with UUID pattern
-            # This strategy uses SPLIT_PART to extract the main UUID from person_details UUID
-            # Pattern: person_details.UUID = main.UUID + "_" + suffix
-            create_query = f"""
-            CREATE TABLE "{UNIFIED_TABLE}" AS
-            SELECT 
-                m.*,
-                -- Use COALESCE to return empty array instead of null when no person details exist
-                COALESCE(pd.person_details, '[]'::jsonb) as person_details,
-                CASE 
-                    WHEN m.building_image_url IS NOT NULL 
-                    THEN '<img src=' || CHR(34) || m.building_image_url || CHR(34) || ' width=' || CHR(34) || '100%' || CHR(34) || ' height=' || CHR(34) || '100%' || CHR(34) || ' />' 
-                    ELSE NULL 
-                END as building_image_url_html,
-                CASE 
-                    WHEN m.address_plus_code_url IS NOT NULL 
-                    THEN '<img src=' || CHR(34) || m.address_plus_code_url || CHR(34) || ' width=' || CHR(34) || '100%' || CHR(34) || ' height=' || CHR(34) || '100%' || CHR(34) || ' />' 
-                    ELSE NULL 
-                END as address_plus_code_url_html
-            FROM "{MAIN_TABLE}" m
-            -- SUBCONSULTA que agrega person_details usando la estrategia DIRECT_MATCH confirmada
-            LEFT JOIN (
-                SELECT 
-                    -- Extraer el UUID principal del UUID de person_details usando SPLIT_PART
-                    SPLIT_PART(p."UUID", '_', 1) as main_uuid,
-                    -- Agregar todos los person_details para cada submission
-                    jsonb_agg(
-                        jsonb_build_object(
-                            'UUID', p."UUID",
-                            'person_type', p."person_type",
-                            'shop_apt_unit_number', p."shop_apt_unit_number",
-                            'type', p."type",
-                            'business_name', p."business_name",
-                            'tax_registered', p."tax_registered",
-                            'tin', p."tin",
-                            'individual_first_name', p."individual_first_name",
-                            'individual_middle_name', p."individual_middle_name",
-                            'individual_last_name', p."individual_last_name",
-                            'individual_gender', p."individual_gender",
-                            'individual_id_type', p."individual_id_type",
-                            'individual_nin', p."individual_nin",
-                            'individual_drivers_licence', p."individual_drivers_licence",
-                            'individual_passport_number', p."individual_passport_number",
-                            'passport_country', p."passport_country",
-                            'individual_residence_permit_number', p."individual_residence_permit_number",
-                            'residence_permit_country', p."residence_permit_country",
-                            'individual_dob', p."individual_dob",
-                            'mobile_1', p."mobile_1",
-                            'mobile_2', p."mobile_2",
-                            'email', p."email",
-                            'occupancy', p."occupancy"
-                        )
-                    ) as person_details
-                FROM "{PERSON_DETAILS_TABLE}" p
-                -- Solo procesar registros que tienen UUID válido
-                WHERE p."UUID" IS NOT NULL 
-                  AND p."UUID" != ''
-                -- Agrupar por el UUID principal extraído
-                GROUP BY SPLIT_PART(p."UUID", '_', 1)
-            ) pd ON m."UUID" = pd.main_uuid
-            """
-        
-        # Execute the query to create the unified table
+
+        # Execute the query to create the optimized unified table
         execute_query(create_query)
-        
-        # Add a primary key to the unified table
+        logger.info("Successfully created optimized unified table")
+
+        # Add composite primary key constraint (submission UUID + person UUID)
         pk_query = f"""
-        ALTER TABLE "{UNIFIED_TABLE}" ADD PRIMARY KEY ("UUID")
+        ALTER TABLE "{UNIFIED_TABLE}" ADD CONSTRAINT "{UNIFIED_TABLE}_pkey" PRIMARY KEY ("UUID", "Person UUID")
         """
         execute_query(pk_query)
-        
-        logger.info(f"Successfully created unified table {UNIFIED_TABLE}")
+
+        # Create performance indexes
+        logger.info("Creating performance indexes...")
+        performance_indexes = get_performance_indexes()
+        for index_query in performance_indexes:
+            try:
+                execute_query(index_query)
+                logger.info(f"Created index: {index_query.split('idx_')[1].split()[0]}")
+            except Exception as idx_e:
+                logger.warning(f"Failed to create index: {idx_e}")
+
+        # Add additional indexes for commonly queried fields (only for columns that exist)
+        additional_indexes = [
+            f"CREATE INDEX IF NOT EXISTS idx_gra_property_name ON \"{UNIFIED_TABLE}\" (\"Property Name\");",
+            f"CREATE INDEX IF NOT EXISTS idx_gra_town ON \"{UNIFIED_TABLE}\" (\"Town\");",
+            f"CREATE INDEX IF NOT EXISTS idx_gra_district ON \"{UNIFIED_TABLE}\" (\"District\");",
+            # Note: income_type may not exist in final output, skip it
+            f"CREATE INDEX IF NOT EXISTS idx_gra_data_quality ON \"{UNIFIED_TABLE}\" (\"Data Quality Score\");",
+            f"CREATE INDEX IF NOT EXISTS idx_gra_survey_date ON \"{UNIFIED_TABLE}\" (\"Survey Date\");",
+            f"CREATE INDEX IF NOT EXISTS idx_gra_submission_date ON \"{UNIFIED_TABLE}\" (\"Submission Date\");"
+        ]
+
+        for index_query in additional_indexes:
+            try:
+                execute_query(index_query)
+                logger.info(f"Created additional index: {index_query.split('idx_')[1].split()[0]}")
+            except Exception as idx_e:
+                logger.warning(f"Failed to create additional index: {idx_e}")
+
+        logger.info(f"Successfully created optimized unified table {UNIFIED_TABLE} with performance indexes")
         return True
+
     except Exception as e:
-        logger.error(f"Error creating unified table {UNIFIED_TABLE}: {e}")
+        logger.error(f"Error creating optimized unified table {UNIFIED_TABLE}: {e}")
         return False
 
 
